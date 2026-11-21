@@ -15,17 +15,25 @@
 
 ## Шаг 1. Получить сборку
 
-Сборка делается в GitHub Actions, workflow «Windows build (exe + msi)», ветка `ccr-e57fc87f-b0z4sx`.
+Основной путь — релиз на GitHub (страница Releases репозитория `masterRaizer/Editmaker`, тег `v1.0.0` или новее):
 
 ```powershell
 gh auth status
-gh run list -R masterRaizer/Editmaker -w "Windows build (exe + msi)" -L 5
-# возьми ID последнего запуска со статусом success
-gh run download <RUN_ID> -R masterRaizer/Editmaker -D $env:USERPROFILE\Downloads\EditMaker-build
-Get-ChildItem $env:USERPROFILE\Downloads\EditMaker-build -Recurse | Get-FileHash -Algorithm SHA256
+gh release list -R masterRaizer/Editmaker -L 3
+gh release download v1.0.0 -R masterRaizer/Editmaker -D $env:USERPROFILE\Downloads\EditMaker-build
+Get-ChildItem $env:USERPROFILE\Downloads\EditMaker-build | Get-FileHash -Algorithm SHA256
 ```
 
-В артефакте два файла:
+Если `gh` нет: `winget install -e --id GitHub.cli`, затем `gh auth login`. Без авторизации файлы можно скачать браузером со страницы Releases.
+
+Запасной путь — артефакт последней зелёной сборки (workflow «Windows build (exe + msi)», ветка `ccr-e57fc87f-b0z4sx`):
+
+```powershell
+gh run list -R masterRaizer/Editmaker -w "Windows build (exe + msi)" -L 5
+gh run download <RUN_ID> -R masterRaizer/Editmaker -D $env:USERPROFILE\Downloads\EditMaker-build
+```
+
+В релизе и в артефакте по два файла:
 - `EditMaker-<версия>-x64.msi` — установщик в `C:\Program Files\EditMaker`, ярлыки в «Пуске» и на рабочем столе;
 - `EditMaker-<версия>-portable.exe` — один файл без установки; первый запуск дольше на 5–15 с, пока программа распаковывается.
 
@@ -39,7 +47,7 @@ git clone -b ccr-e57fc87f-b0z4sx https://github.com/masterRaizer/Editmaker
 cd Editmaker
 py -3.12 -m venv .venv; .\.venv\Scripts\Activate.ps1
 pip install -r requirements-build.txt
-# ffmpeg: скачай ffmpeg-n7.1-latest-win64-gpl-7.1.zip из https://github.com/BtbN/FFmpeg-Builds/releases
+# ffmpeg: скачай свежий ffmpeg-nX.Y-latest-win64-gpl-X.Y.zip (не shared) из https://github.com/BtbN/FFmpeg-Builds/releases
 # и положи ffmpeg.exe и ffprobe.exe в packaging\ffmpeg\
 python -m pytest -q
 pyinstaller --noconfirm --clean packaging\editmaker.spec
