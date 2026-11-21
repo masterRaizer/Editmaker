@@ -30,6 +30,35 @@ def _free_port(preferred: int) -> int:
     raise RuntimeError("no free port")
 
 
+class _Tee:
+    """Write CLI output to cli.log and, when the .exe was started from a console, to that console too."""
+
+    def __init__(self, log_file, console):
+        self.log_file, self.console = log_file, console
+
+    def write(self, data: str) -> int:
+        self.log_file.write(data)
+        self.log_file.flush()
+        if self.console is not None:
+            try:
+                self.console.write(data)
+            except (UnicodeEncodeError, OSError, ValueError):
+                enc = getattr(self.console, "encoding", None) or "ascii"
+                try:
+                    self.console.write(data.encode(enc, "replace").decode(enc))
+                except (OSError, ValueError):
+                    pass
+        return len(data)
+
+    def flush(self) -> None:
+        self.log_file.flush()
+        if self.console is not None:
+            try:
+                self.console.flush()
+            except (OSError, ValueError):
+                pass
+
+
 class JsApi:
     """Methods exposed to the page as window.pywebview.api.*"""
 
@@ -69,11 +98,16 @@ def main(argv: list[str] | None = None) -> int:
         # console helpers stay available in the frozen build: EditMaker.exe selftest C:\\temp\\test
         # A windowed .exe has no stdout: mirror the output into <data>/cli.log.
         from .cli import main as cli_main
-        if sys.stdout is None:
-            log_path = paths.default_data_dir() / "cli.log"
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-            sys.stdout = sys.stderr = open(log_path, "w", encoding="utf-8")
-        return cli_main(argv)
+        log_path = paths.default_data_dir() / "cli.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "w", encoding="utf-8") as log_file:
+            tee = _Tee(log_file, sys.stdout)
+            old = sys.stdout, sys.stderr
+            sys.stdout = sys.stderr = tee
+            try:
+                return cli_main(argv)
+            finally:
+                sys.stdout, sys.stderr = old
 
     import uvicorn
 
