@@ -22,17 +22,21 @@ GRADES = {
 }
 
 
-def encoder_args(encoder: str, quality: str) -> list[str]:
+def encoder_args(encoder: str, quality: str, fps: int = 60, tune: str = "film") -> list[str]:
     if encoder == "auto":
         encoder = "h264_nvenc" if ffmpeg.nvenc_usable() else "libx264"
+    gop = ["-g", str(fps * 2), "-bf", "3"]
     if encoder == "h264_nvenc":
-        cq = "18" if quality == "final" else "23"
-        preset = "p6" if quality == "final" else "p3"
-        return ["-c:v", "h264_nvenc", "-preset", preset, "-rc", "vbr", "-cq", cq, "-b:v", "0",
-                "-profile:v", "high", "-pix_fmt", "yuv420p"]
+        if quality == "final":
+            return ["-c:v", "h264_nvenc", "-preset", "p7", "-tune", "hq", "-rc", "vbr", "-cq", "17", "-b:v", "0",
+                    "-spatial-aq", "1", "-aq-strength", "10", "-rc-lookahead", "32", "-profile:v", "high",
+                    "-pix_fmt", "yuv420p", *gop]
+        return ["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "23", "-b:v", "0", "-pix_fmt", "yuv420p", *gop]
     if quality == "final":
-        return ["-c:v", "libx264", "-crf", "16", "-preset", "slow", "-profile:v", "high", "-pix_fmt", "yuv420p"]
-    return ["-c:v", "libx264", "-crf", "20", "-preset", "veryfast", "-pix_fmt", "yuv420p"]
+        # aq-mode 3 keeps dark gradients from banding; tune animation/film by source type
+        return ["-c:v", "libx264", "-crf", "16", "-preset", "slow", "-tune", tune,
+                "-x264-params", "aq-mode=3:aq-strength=0.9", "-profile:v", "high", "-pix_fmt", "yuv420p", *gop]
+    return ["-c:v", "libx264", "-crf", "20", "-preset", "veryfast", "-pix_fmt", "yuv420p", *gop]
 
 
 def resolved_encoder(encoder: str) -> str:
@@ -52,24 +56,56 @@ def _impulses(times: list[float], amp: float, decay: float, osc: Optional[str] =
     return "+".join(parts) if parts else "0"
 
 
+WHIP = ("slide", "smooth", "wipe", "cover", "reveal")
+
+
+def _windows(times: list[float], length: float) -> str:
+    return "+".join(f"between(t,{t:.3f},{t + length:.3f})" for t in times[:16])
+
+
+def _transition_blur(kind: str, t0: float, t1: float, W: int) -> list[str]:
+    """Motion blur that sells a transition: directional for whips/slides, gaussian for zooms.
+    Two strengths: light over the whole transition, heavy around the cut in the middle."""
+    if t1 - t0 < 0.03:
+        return []
+    mid0, mid1 = t0 + (t1 - t0) * 0.25, t0 + (t1 - t0) * 0.75
+    k = W / 1080.0
+    if kind.startswith(WHIP):
+        angle = 90 if kind.endswith(("up", "down")) else 0
+        return [f"dblur=angle={angle}:radius={max(2, round(10 * k))}:enable='between(t,{t0:.3f},{t1:.3f})'",
+                f"dblur=angle={angle}:radius={max(4, round(28 * k))}:enable='between(t,{mid0:.3f},{mid1:.3f})'"]
+    if kind.startswith("zoom"):
+        return [f"gblur=sigma={2.5 * k:.2f}:enable='between(t,{t0:.3f},{t1:.3f})'",
+                f"gblur=sigma={6 * k:.2f}:enable='between(t,{mid0:.3f},{mid1:.3f})'"]
+    return []
+
+
 def segment_video_filter(seg: dict, idx: int, W: int, H: int, fps: int, vibe: str, contrast: float,
-                         shake_px: float, flash_amp: float, quality: str) -> str:
+                         shake_px: float, flash_amp: float, quality: str, intensity: float = 1.0,
+                         slowmo: str = "blend") -> str:
+    """slowmo: blend (frame blending, fast) | flow (optical flow via minterpolate, slow) | off (duplicate frames)."""
     D = seg["clip_dur"]
-    pre = 1.5 if quality == "final" else 1.0
+    speed = seg.get("speed")
+    final = quality == "final"
+    # optical-flow slow motion needs frames at output size; zoom headroom then comes from zoom >= 1.07
+    slowed = bool(speed and min(speed["s1"], speed["s2"]) < 1.0)
+    flow = bool(final and slowmo == "flow" and slowed)
+    blend = bool(slowmo in ("blend", "flow") and slowed and not flow)
+    pre = 1.5 if final and not flow else 1.0
     PW, PH = int(round(W * pre / 2) * 2), int(round(H * pre / 2) * 2)
     T = f"(on/{fps})"
     zoom = seg["zoom"]
     p = f"min(1,{T}/{D:.3f})"
     ease = f"({p}*{p}*(3-2*{p}))"
     if zoom == "push":
-        z = f"1.02+0.07*{ease}"
+        z = f"1.03+0.07*{ease}"
     elif zoom == "drift_in":
-        z = f"1.0+0.1*{ease}"
+        z = f"1.02+0.1*{ease}"
     elif zoom == "drift_out":
-        z = f"1.1-0.1*{ease}"
+        z = f"1.12-0.1*{ease}"
     elif zoom == "punch":
-        pulses = _impulses(seg.get("shake", []), 0.035, 9.0, var=T)
-        z = f"1.07+0.09*exp(-{T}*9)+{pulses}"
+        pulses = _impulses(seg.get("shake", []), 0.035 * intensity, 9.0, var=T)
+        z = f"1.07+{0.09 * intensity:.3f}*exp(-{T}*9)+{pulses}"
     else:
         z = "1.0"
     sx = sy = "0"
@@ -79,17 +115,35 @@ def segment_video_filter(seg: dict, idx: int, W: int, H: int, fps: int, vibe: st
         sy = _impulses(seg["shake"], amp * 0.6, 14.0, osc=f"cos({T}*61)", var=T)
     x = f"max(0,min(iw-iw/zoom,(iw-iw/zoom)/2+{sx}))"
     y = f"max(0,min(ih-ih/zoom,(ih-ih/zoom)/2+{sy}))"
-    chain = [
-        f"[{idx}:v]fps={fps}",
-        f"scale={PW}:{PH}:force_original_aspect_ratio=increase:flags=lanczos",
-        f"crop={PW}:{PH}",
-        "setsar=1",
+    chain = [f"[{idx}:v]setpts=PTS-STARTPTS"]
+    if speed:
+        # piecewise speed: input time T → screen time; s1 before the split point, s2 after
+        a = D * speed["split"] * speed["s1"]
+        s1, s2 = speed["s1"], speed["s2"]
+        chain.append(f"setpts='if(lt(T,{a:.4f}),T/{s1},{a:.4f}/{s1}+(T-{a:.4f})/{s2})/TB'")
+    if flow:
+        chain += [f"scale={PW}:{PH}:force_original_aspect_ratio=increase:flags=lanczos", f"crop={PW}:{PH}", "setsar=1",
+                  f"minterpolate=fps={fps}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1:scd=fdiff"]
+    else:
+        rate = f"framerate=fps={fps}:interp_start=32:interp_end=224:scene=10" if blend else f"fps={fps}"
+        chain += [rate, f"scale={PW}:{PH}:force_original_aspect_ratio=increase:flags=lanczos",
+                  f"crop={PW}:{PH}", "setsar=1"]
+    chain += [
         f"tpad=stop_mode=clone:stop_duration={D:.3f}",
         f"trim=duration={D:.3f}",
         "setpts=PTS-STARTPTS",
         f"zoompan=z='{z}':x='{x}':y='{y}':d=1:s={W}x{H}:fps={fps}",
         GRADES.get(vibe, GRADES["custom"]).format(c=f"{contrast:.3f}"),
     ]
+    t_in, t_out = seg.get("transition_in", {}), seg.get("transition_out", {})
+    chain += _transition_blur(t_in.get("type", "cut"), 0.0, t_in.get("dur", 0.0), W)
+    chain += _transition_blur(t_out.get("type", "cut"), D - t_out.get("dur", 0.0), D, W)
+    if seg.get("glitch"):
+        sh = max(2, round(10 * intensity * W / 1080))
+        chain.append(f"rgbashift=rh=-{sh}:bh={sh}:gv={sh // 3}:edge=smear:enable='{_windows(seg['glitch'], 0.08)}'")
+    if seg.get("impact"):
+        # impact frame: two inverted frames exactly on the drop
+        chain.append(f"negate=enable='{_windows(seg['impact'], 1.6 / fps)}'")
     if flash_amp and seg.get("flash"):
         br = _impulses(seg["flash"], flash_amp, 10.0, var="t")
         chain.append(f"eq=brightness='{br}':eval=frame")
@@ -107,12 +161,14 @@ def segment_audio_filter(seg: dict, idx: int) -> str:
 
 
 def build_graph(plan: dict, *, W: int, H: int, fps: int, vibe: str, wm: dict, wm_files: dict, quality: str,
-                loudness: float, music_input: Optional[int], image_input: Optional[int]) -> str:
+                loudness: float, music_input: Optional[int], image_input: Optional[int],
+                loudnorm: Optional[str] = None, slowmo: str = "blend") -> str:
     segs = plan["segments"]
     fx = plan["effects"]
     parts = []
     for i, seg in enumerate(segs):
-        parts.append(segment_video_filter(seg, i, W, H, fps, vibe, fx["contrast"], fx["shake_px"], fx["flash"], quality))
+        parts.append(segment_video_filter(seg, i, W, H, fps, vibe, fx["contrast"], fx["shake_px"], fx["flash"], quality,
+                                          fx.get("intensity", 1.0), slowmo))
         if music_input is None:
             parts.append(segment_audio_filter(seg, i))
 
@@ -135,6 +191,14 @@ def build_graph(plan: dict, *, W: int, H: int, fps: int, vibe: str, wm: dict, wm
                 parts.append(f"[{acur}][a{k}]acrossfade=d={t['dur']:.3f}:c1=tri:c2=tri[ax{k}]")
         cur = out
         acur = f"ax{k}"
+
+    # finishing on the whole timeline: crisp detail, then fine film grain (also hides banding in dark gradients)
+    if quality == "final":
+        finish = ["unsharp=5:5:0.55:5:5:0.0"]
+        if fx.get("grain"):
+            finish.append(f"noise=alls={max(1, round(6 * fx['grain']))}:allf=t")
+        parts.append(f"[{cur}]{','.join(finish)}[fin]")
+        cur = "fin"
 
     # in-video watermark
     img_main = img_outro = None
@@ -168,7 +232,7 @@ def build_graph(plan: dict, *, W: int, H: int, fps: int, vibe: str, wm: dict, wm
     fade_len = max(0.4, plan["outro_duration"] * 0.9) if plan["outro"] else 0.4
     tail = (f"apad,atrim=duration={total:.3f},afade=t=in:d=0.03,"
             f"afade=t=out:st={max(0.0, total - fade_len):.3f}:d={fade_len:.3f},"
-            f"loudnorm=I={loudness}:TP=-1.5:LRA=11,aresample=48000,"
+            f"{loudnorm or f'loudnorm=I={loudness}:TP=-1.5:LRA=11'},aresample=48000,"
             f"aformat=sample_fmts=fltp:channel_layouts=stereo[aout]")
     if music_input is not None:
         parts.append(f"[{music_input}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,{tail}")
@@ -198,8 +262,35 @@ def _place(tmp: Path, target: Path) -> Path:
         n += 1
 
 
+def measure_music(plan: dict, loudness: float) -> Optional[str]:
+    """First loudnorm pass on the music excerpt; returns a linear (non-pumping) second-pass filter."""
+    import json
+    import re
+    import subprocess
+    m = plan.get("music")
+    if not m:
+        return None
+    total = plan["total_duration"]
+    fade_len = max(0.4, plan["outro_duration"] * 0.9) if plan["outro"] else 0.4
+    af = (f"aresample=48000,apad,atrim=duration={total:.3f},afade=t=out:st={max(0.0, total - fade_len):.3f}:d={fade_len:.3f},"
+          f"loudnorm=I={loudness}:TP=-1.5:LRA=11:print_format=json")
+    try:
+        r = subprocess.run([ffmpeg.FFMPEG, "-hide_banner", "-nostdin", "-ss", f"{m['start']:.3f}", "-t", f"{total + 0.5:.3f}",
+                            "-i", m["path"], "-af", af, "-f", "null", "-"], capture_output=True, text=True, timeout=300,
+                           **ffmpeg._NOWIN)
+        js = json.loads(re.findall(r"\{[^{}]*\"input_i\"[^{}]*\}", r.stderr)[-1])
+        if float(js["input_i"]) < -70:  # silence: nothing to normalise
+            return None
+        return (f"loudnorm=I={loudness}:TP=-1.5:LRA=11:measured_I={js['input_i']}:measured_TP={js['input_tp']}:"
+                f"measured_LRA={js['input_lra']}:measured_thresh={js['input_thresh']}:offset={js['target_offset']}:"
+                f"linear=true")
+    except (IndexError, KeyError, ValueError, OSError, subprocess.TimeoutExpired):
+        return None
+
+
 def render(plan: dict, out_path: Path, *, resolution: str, fps: int, vibe: str, wm: dict, encoder: str,
-           quality: str, loudness: float = -14.0, progress: Optional[Callable[[float], None]] = None) -> dict:
+           quality: str, loudness: float = -14.0, progress: Optional[Callable[[float], None]] = None,
+           slowmo: str = "blend") -> dict:
     W, H = RESOLUTIONS[resolution]
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -210,7 +301,8 @@ def render(plan: dict, out_path: Path, *, resolution: str, fps: int, vibe: str, 
         wm_files = watermark.prepare_files(wm, workdir) if wm["usable"] else {}
         args: list[str] = []
         for seg in plan["segments"]:
-            args += ["-ss", f"{seg['src_start']:.3f}", "-t", f"{seg['clip_dur'] + 0.5:.3f}", "-i", seg["path"]]
+            args += ["-ss", f"{seg['src_start']:.3f}", "-t", f"{seg.get('src_dur', seg['clip_dur']) + 0.5:.3f}",
+                     "-i", seg["path"]]
         n = len(plan["segments"])
         music_input = image_input = None
         if plan.get("music"):
@@ -222,12 +314,14 @@ def render(plan: dict, out_path: Path, *, resolution: str, fps: int, vibe: str, 
             args += ["-loop", "1", "-framerate", str(fps), "-t", f"{plan['total_duration'] + 1:.3f}", "-i", wm_files["image"]]
             image_input = n
             n += 1
+        loud2 = measure_music(plan, loudness) if music_input is not None else None
         graph = build_graph(plan, W=W, H=H, fps=fps, vibe=vibe, wm=wm, wm_files=wm_files, quality=quality,
-                            loudness=loudness, music_input=music_input, image_input=image_input)
+                            loudness=loudness, music_input=music_input, image_input=image_input,
+                            loudnorm=loud2, slowmo=slowmo)
         (workdir / "graph.txt").write_text(graph, encoding="utf-8")
         tmp_out = workdir / "out.mp4"
         args += [*ffmpeg.filter_script_args("graph.txt"), "-map", "[vout]", "-map", "[aout]",
-                 "-r", str(fps), *encoder_args(encoder, quality),
+                 "-r", str(fps), *encoder_args(encoder, quality, fps, "animation" if plan.get("anime") else "film"),
                  "-c:a", "aac", "-b:a", "320k", "-ar", "48000",
                  "-movflags", "+faststart", "-t", f"{plan['total_duration']:.3f}", str(tmp_out)]
         ffmpeg.run(args, total_seconds=plan["total_duration"], progress=progress, cwd=workdir)

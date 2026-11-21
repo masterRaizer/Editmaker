@@ -211,8 +211,10 @@ class EditMaker:
             out_dir = output_root / f"{slug}-{n}"
             n += 1
         out_dir.mkdir(parents=True, exist_ok=True)
+        styles = [x for x in (payload.get("styles") or planner.STYLE_ORDER) if x in planner.STYLES] or planner.STYLE_ORDER
         settings = {
             "vibe": vibe,
+            "styles": styles,
             "track": payload.get("track") or "auto",   # auto | none | <path>
             "render": render_cfg,
             "watermark": {k: v for k, v in wm.items() if k != "usable"},
@@ -220,7 +222,7 @@ class EditMaker:
         }
         pid = self.db.create_project(name, out_dir.name, str(out_dir), settings, source_ids)
         self.settings.update({"output_folder": str(output_root), "vibe": vibe if vibe != "auto" else cfg["vibe"],
-                              "watermark": settings["watermark"]})
+                              "watermark": settings["watermark"], "render": render_cfg, "styles": styles})
         count = int(payload.get("variants") or render_cfg.get("variants") or 4)
         jobs = self.add_variants(pid, count)
         return {"project": self.project(pid), "jobs": jobs}
@@ -253,8 +255,9 @@ class EditMaker:
         start = self.db.next_variant_idx(pid)
         for i in range(count):
             idx = start + i
-            style = planner.STYLE_ORDER[(idx - 1) % len(planner.STYLE_ORDER)]
-            seed = random.randint(1, 10**9) if idx > len(planner.STYLE_ORDER) else idx
+            styles = p["settings"].get("styles") or planner.STYLE_ORDER
+            style = styles[(idx - 1) % len(styles)]
+            seed = random.randint(1, 10**9) if idx > len(styles) else idx
             vid = self.db.add_variant(pid, idx, style, seed, p["settings"]["render"], p["settings"]["watermark"])
             self.db.log(vid, "created", {"style": style, "seed": seed})
             jobs.append(self.render_variant(vid))
@@ -318,14 +321,16 @@ class EditMaker:
             wm = watermark.normalize(p["settings"]["watermark"])
             track, note = self._resolve_track(p, srcs, vibe, v["seed"], float(r["duration"]))
             plan = planner.build_plan(srcs, v["style"], v["seed"], float(r["duration"]), track,
-                                      outro=wm["outro"], outro_duration=wm["outro_duration"])
+                                      outro=wm["outro"], outro_duration=wm["outro_duration"],
+                                      intensity=float(r.get("intensity", 1.0)))
             plan["vibe"] = vibe
+            plan["anime"] = metadata.is_anime([s.path for s in srcs])
             plan["note"] = note
             self.db.set_variant(vid, plan=plan)
             out = Path(p["output_dir"]) / f"variant_{v['idx']:02d}.mp4"
             res = render.render(plan, out, resolution=r["resolution"], fps=int(r["fps"]), vibe=vibe, wm=wm,
                                 encoder=r.get("encoder", "auto"), quality=r.get("quality", "final"),
-                                loudness=float(r.get("loudness_lufs", -14.0)),
+                                loudness=float(r.get("loudness_lufs", -14.0)), slowmo=r.get("slowmo", "blend"),
                                 progress=lambda f: report(0.02 + 0.96 * f, "рендер"))
             fp = file_fingerprint(out)
             meta = v.get("metadata") or self._generate_meta(p, v, plan, vibe)
@@ -537,6 +542,21 @@ class EditMaker:
             raise BadRequest("Неверный state OAuth — начните авторизацию заново")
         self.publishers[platform].exchange_code(code)
 
+    def delete_variant(self, vid: int) -> dict:
+        """Remove a variant and its rendered files (only files EditMaker wrote into the project folder)."""
+        v = self._get_variant(vid)
+        if v["status"] == "published":
+            raise BadRequest("Опубликованный вариант не удаляется: на него ссылаются публикации")
+        p = self.db.project(v["project_id"])
+        root = Path(p["output_dir"]).resolve()
+        for f in (v.get("file_path"), v.get("thumb_path")):
+            if f and Path(f).is_file() and root in Path(f).resolve().parents:
+                Path(f).unlink()
+        self.db.exec("DELETE FROM variants WHERE id=?", (vid,))
+        self.db.log(vid, "deleted", None)
+        self.write_meta_json(p["id"])
+        return self.project(p["id"])
+
     # ---------------------------------------------------------------- export to NLE / CapCut
     EXPORT_FORMATS = ("fcpxml", "edl", "capcut")
 
@@ -602,4 +622,6 @@ class EditMaker:
             return True  # live preview of the PNG watermark
         roots = [Path(p["output_dir"]).resolve() for p in self.db.projects()]
         roots += [Path(f).resolve() for f in self.settings.get()["source_folders"]]
+        roots.append(Path(self.settings.get()["music_library"]).resolve())
+        roots += [Path(t["path"]).resolve().parent for t in self.db.tracks()]
         return any(path == r or r in path.parents for r in roots)

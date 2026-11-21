@@ -41,7 +41,10 @@ DEFAULTS: dict = {
         "duration": 20.0,           # seconds of edit before the outro
         "variants": 4,
         "loudness_lufs": -14.0,
+        "intensity": 1.0,           # 0.3..1.6 — strength of shake / flashes / glitches / zoom punches
+        "slowmo": "blend",          # blend | flow (optical flow, slow) | off
     },
+    "styles": ["cold", "drop", "flow", "hook"],
     "vibe": "dexter_cold_dark",
     "watermark": {
         "type": "text",             # text | image

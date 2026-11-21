@@ -69,6 +69,10 @@ function fillSetup() {
   $("wmIn").checked = w.in_video; $("wmOutro").checked = w.outro; $("wmDrift").checked = w.drift;
   $("resolution").value = r.resolution; $("fps").value = String(r.fps); $("duration").value = r.duration;
   $("variantCount").value = r.variants; $("quality").value = r.quality; $("encoder").value = r.encoder;
+  $("intensity").value = r.intensity ?? 1; $("slowmo").value = r.slowmo || "blend";
+  $("intensityOut").textContent = Number($("intensity").value).toFixed(1);
+  const styles = c.styles || ["cold", "drop", "flow", "hook"];
+  document.querySelectorAll("input[name=style]").forEach((cb) => (cb.checked = styles.includes(cb.value)));
   syncWm();
 }
 function isLandscape() { const [w, h] = $("resolution").value.split("x").map(Number); return w > h; }
@@ -191,6 +195,14 @@ function renderTrackSelect(extraPath) {
   }
   sel.value = [...sel.options].some((o) => o.value === cur) ? cur : "auto";
   $("musicHint").hidden = S.tracks.length > 0;
+  syncTrackPreview();
+}
+function syncTrackPreview() {
+  const v = $("track").value, a = $("trackAudio");
+  const show = v !== "auto" && v !== "none";
+  a.hidden = !show;
+  const want = show ? media(v) : "";
+  if (a.dataset.src !== want) { a.pause(); a.dataset.src = want; if (want) a.src = want; else a.removeAttribute("src"); }
 }
 const escapeHtml = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const escapeAttr = escapeHtml;
@@ -293,6 +305,14 @@ function renderInfo(v) {
     ["Видео", pr.width ? `${pr.width}×${pr.height} ${pr.fps}fps ${r.encoder_used || ""} ${pr.bitrate ? Math.round(pr.bitrate / 1000) + " kb/s" : ""}` : "—"],
     ["Файл", v.file_path || "—"],
   ];
+  if (p.segments) {
+    const ramps = p.segments.filter((s) => s.speed).length;
+    const glitch = p.segments.reduce((n, s) => n + (s.glitch || []).length, 0);
+    const fx = [ramps && `рампы скорости: ${ramps}`, glitch && `RGB-сдвиги: ${glitch}`,
+      p.impact_time != null && `impact-кадр на ${fmtTime(p.impact_time)}`,
+      p.effects && `сила ${Number(p.effects.intensity || 1).toFixed(1)}`].filter(Boolean).join(", ");
+    rows.splice(3, 0, ["Эффекты", fx || "без акцентов"]);
+  }
   if (p.note) rows.push(["Примечание", p.note]);
   $("variantInfo").innerHTML = rows.map(([k, val]) => `<dt>${k}</dt><dd>${escapeHtml(val)}</dd>`).join("");
 }
@@ -313,8 +333,12 @@ function drawTimeline(plan) {
   g.fillStyle = css.getPropertyValue("--muted");
   const strong = new Set((plan.strong || []).map((t) => t.toFixed(2)));
   for (const b of plan.beats || []) { const s = strong.has(b.toFixed(2)); g.fillRect(Math.round(x(b)), base - (s ? 12 : 6), 1, s ? 12 : 6); }
+  // speed ramps: faint band under the segment
+  g.fillStyle = css.getPropertyValue("--line");
+  for (const s of plan.segments || []) if (s.speed) g.fillRect(x(s.out_start), base + 1, x(s.out_end) - x(s.out_start), 3);
   g.fillStyle = css.getPropertyValue("--cut");
   for (const b of (plan.boundaries || []).slice(1, -1)) g.fillRect(Math.round(x(b)) - 1, 6, 2, base - 6);
+  if (plan.impact_time != null) { g.fillStyle = css.getPropertyValue("--text"); g.fillRect(Math.round(x(plan.impact_time)) - 1, 0, 3, 8); }
   if (plan.outro) {
     g.fillStyle = css.getPropertyValue("--field");
     g.fillRect(x(plan.main_duration), 6, x(T) - x(plan.main_duration), base - 6);
@@ -591,6 +615,14 @@ $("pickerGo").onclick = () => browse($("pickerPath").value);
 $("pickerPath").onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); browse($("pickerPath").value); } };
 $("pickerOk").onclick = () => pickDone($("pickerPath").value);
 $("vibe").onchange = () => renderTrackSelect();
+$("track").onchange = syncTrackPreview;
+$("intensity").oninput = () => ($("intensityOut").textContent = Number($("intensity").value).toFixed(1));
+$("deleteBtn").onclick = async () => {
+  const v = currentVariant(); if (!v) return;
+  if (!confirm(`Удалить вариант ${String(v.idx).padStart(2, "0")} и его файл?`)) return;
+  try { S.project = await api(`/api/variants/${v.id}`, { method: "DELETE" }); S.variantId = S.project.variants[0] && S.project.variants[0].id; shownFile = null; renderProject(); toast("Вариант удалён"); }
+  catch (e) { toast(e.message, "err"); }
+};
 $("projectSelect").onchange = (e) => e.target.value && loadProject(Number(e.target.value));
 $("clipAll").onchange = (e) => { S.selected = e.target.checked ? new Set(S.sources.map((s) => s.id)) : new Set(); loadSources(); };
 ["ytTitle", "ytTags"].forEach((id) => ($(id).oninput = updateCounts));
@@ -622,6 +654,8 @@ $("outputFolder").onchange = async () => { S.cfg = await api("/api/config", { me
 
 $("createBtn").onclick = async (e) => {
   showErr($("createError"), null);
+  if (!S.selected.size) return showErr($("createError"), new Error("Отметьте хотя бы один клип в списке исходников."));
+  if (!document.querySelector("input[name=style]:checked")) return showErr($("createError"), new Error("Отметьте хотя бы один стиль."));
   e.target.disabled = true;
   try {
     const body = {
@@ -633,7 +667,9 @@ $("createBtn").onclick = async (e) => {
       watermark: watermarkFromForm(),
       variants: Number($("variantCount").value),
       render: { resolution: $("resolution").value, fps: Number($("fps").value), duration: Number($("duration").value),
-        quality: $("quality").value, encoder: $("encoder").value, variants: Number($("variantCount").value) },
+        quality: $("quality").value, encoder: $("encoder").value, variants: Number($("variantCount").value),
+        intensity: Number($("intensity").value), slowmo: $("slowmo").value },
+      styles: [...document.querySelectorAll("input[name=style]:checked")].map((c) => c.value),
     };
     const res = await api("/api/projects", { method: "POST", body });
     S.variantId = null;

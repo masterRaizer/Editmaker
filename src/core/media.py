@@ -105,10 +105,14 @@ def analyze_visual(path: Path, fps: float = 4.0) -> dict:
     for i in cut_idx:
         motion[i] = motion[i - 1] if i > 0 else 0
     motion = np.clip(motion / 40.0, 0, 1)
+    # detail: mean absolute Laplacian (edges / texture) — prefers sharp, detailed frames over blur and flat fills
+    lap = np.abs(4 * f[:, 1:-1, 1:-1] - f[:, :-2, 1:-1] - f[:, 2:, 1:-1] - f[:, 1:-1, :-2] - f[:, 1:-1, 2:])
+    detail = np.clip(lap.mean(axis=(1, 2)) / 25.0, 0, 1)
     duration = n / fps
     return {
         "fps": fps,
         "motion": [round(float(x), 4) for x in motion],
+        "detail": [round(float(x), 4) for x in detail],
         "luma": [round(float(x), 2) for x in luma],
         "shots": shots,
         "energy": round(float(motion.mean()), 4),

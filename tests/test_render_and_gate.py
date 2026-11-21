@@ -226,3 +226,46 @@ def test_api(app):
     assert any(x["name"].endswith(".mp4") for x in fs["files"])
     assert c.post("/api/projects", json={"source_ids": []}).status_code == 400
     assert c.put("/api/config", json={"vibe": "phonk_aggressive"}).json()["vibe"] == "phonk_aggressive"
+
+
+def test_final_quality_effects_render(media_dir, tmp_path):
+    """Final quality exercises every effect filter: ramps + frame blending, whip/zoom blur, RGB shift,
+    impact frame, sharpen, grain, two-pass loudnorm."""
+    from src.core import audio
+    p = media_dir["clip_a"]
+    info = media.index_file(p)
+    src = [planner.SourceInfo(1, str(p), info["duration"], True, info["title"], media.analyze_visual(p))]
+    track = {"path": str(media_dir["beat"]), "title": "beat", "analysis": audio.analyze_track(media_dir["beat"])}
+    plan = None
+    for seed in range(1, 30):
+        cand = planner.build_plan(src, "drop", seed, 4.0, track, True, 1.0)
+        segs = cand["segments"]
+        if any(s["speed"] for s in segs) and any(s["glitch"] for s in segs) and any(s["impact"] for s in segs):
+            plan = cand
+            break
+    assert plan, "no seed produced all effects"
+    plan["effects"]["grain"] = 0.5
+    assert render.measure_music(plan, -14.0).startswith("loudnorm=I=-14.0")
+    out = tmp_path / "final.mp4"
+    res = render.render(plan, out, resolution="540x960", fps=FPS, vibe="dexter_cold_dark", wm=WM,
+                        encoder="libx264", quality="final")
+    assert abs(res["probe"]["duration"] - plan["total_duration"]) < 0.15
+    assert abs(loudness(out) - (-14.0)) < 1.5
+    # the impact frame is inverted: average brightness jumps against the frame just before
+    t = plan["impact_time"]
+    before, at = frame(out, t - 0.1), frame(out, t + 0.5 / FPS)
+    assert abs(at.mean() - before.mean()) > 20
+
+
+def test_delete_variant(app):
+    em, pid, _ = app
+    p = em.project(pid)
+    v = [x for x in p["variants"] if x["status"] != "published"][-1]
+    f = Path(v["file_path"])
+    assert f.is_file()
+    after = em.delete_variant(v["id"])
+    assert not f.exists() and all(x["id"] != v["id"] for x in after["variants"])
+    pub = [x for x in after["variants"] if x["status"] == "published"]
+    if pub:
+        with pytest.raises(BadRequest):
+            em.delete_variant(pub[0]["id"])

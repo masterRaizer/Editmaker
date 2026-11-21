@@ -51,6 +51,7 @@
       <select id="vibe"></select>
       <label for="track">Трек</label>
       <select id="track"></select>
+      <audio id="trackAudio" controls preload="none" hidden></audio>
       <div class="row">
         <button type="button" id="scanMusic">Сканировать музыку</button>
         <button type="button" data-pick="track">Файл трека</button>
@@ -148,6 +149,21 @@
           </select>
         </div>
       </div>
+      <label for="intensity">Сила эффектов <output id="intensityOut" class="mono"></output></label>
+      <input id="intensity" type="range" min="0.3" max="1.6" step="0.1">
+      <label for="slowmo">Замедление</label>
+      <select id="slowmo">
+        <option value="blend">Смешивание кадров</option>
+        <option value="flow">Оптический поток (в 5 раз дольше)</option>
+        <option value="off">Без сглаживания</option>
+      </select>
+      <fieldset class="styles">
+        <legend>Стили вариантов</legend>
+        <label class="check"><input type="checkbox" name="style" value="cold"> Cold / Dexter Pace</label>
+        <label class="check"><input type="checkbox" name="style" value="drop"> High-Impact Beat / Drop</label>
+        <label class="check"><input type="checkbox" name="style" value="flow"> Smooth / Flow</label>
+        <label class="check"><input type="checkbox" name="style" value="hook"> Fast Hook / Retention Cut</label>
+      </fieldset>
     </div>
 
     <div class="group create sticky">
@@ -190,6 +206,7 @@
         <button type="button" id="moreBtn">Ещё 2 варианта</button>
         <button type="button" id="rerenderBtn">Перерендерить</button>
         <button type="button" id="revealBtn">Показать файл</button>
+        <button type="button" id="deleteBtn" class="quiet">Удалить вариант</button>
       </div>
       <div class="exports">
         <h2>Доработать вручную</h2>

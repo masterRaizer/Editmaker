@@ -123,6 +123,10 @@ def create_app(data_dir: Optional[Path] = None, core: Optional[EditMaker] = None
     def rerender(vid: int):
         return {"job": em.render_variant(vid)}
 
+    @app.delete("/api/variants/{vid}")
+    def delete_variant(vid: int):
+        return em.delete_variant(vid)
+
     @app.put("/api/variants/{vid}/metadata")
     def put_meta(vid: int, body: dict = Body(...)):
         return em.update_metadata(vid, body)

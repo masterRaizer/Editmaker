@@ -33,7 +33,7 @@ def _hashtag(s: str) -> str:
     return "#" + re.sub(r"[^\wА-Яа-яЁё]", "", s.replace(" ", "")).lower()
 
 
-def _is_anime(paths: list[str]) -> bool:
+def is_anime(paths: list[str]) -> bool:
     return any(ANIME_HINTS.search(p or "") for p in paths)
 
 
@@ -47,7 +47,7 @@ def generate(*, titles: list[str], scenes: list[str], paths: list[str], vibe: st
     others = [t for t in dict.fromkeys(titles) if t and t != main]
     hook = rng.choice(vw[lang])
     style_word = STYLE_WORDS.get(style, STYLE_WORDS["drop"])[lang]
-    anime = _is_anime(paths)
+    anime = is_anime(paths)
     kind = ("аниме-эдит" if anime else "dark edit") if lang == "ru" else ("anime edit" if anime else "dark edit")
 
     yt_title = f"{main} — {hook} | {kind}"

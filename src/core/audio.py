@@ -24,9 +24,11 @@ def _stft_mag(y: np.ndarray) -> np.ndarray:
     return np.abs(np.fft.rfft(frames, axis=1)).astype(np.float32)  # [frames, bins]
 
 
-def onset_envelope(y: np.ndarray, sr: int = SR) -> tuple[np.ndarray, np.ndarray]:
-    """Spectral-flux onset strength (full band) and low band (<150 Hz, bass/kick)."""
-    S = np.log1p(10.0 * _stft_mag(y))
+def onset_envelope(y: np.ndarray, sr: int = SR, with_low_level: bool = False):
+    """Spectral-flux onset strength (full band) and low band (<150 Hz, bass/kick).
+    with_low_level=True also returns the low-band magnitude per frame (for bar/downbeat detection)."""
+    M = _stft_mag(y)
+    S = np.log1p(10.0 * M)
     flux = np.maximum(0.0, np.diff(S, axis=0))
     freqs = np.fft.rfftfreq(NFFT, 1.0 / sr)
     low = flux[:, freqs < 150].sum(axis=1)
@@ -42,6 +44,10 @@ def onset_envelope(y: np.ndarray, sr: int = SR) -> tuple[np.ndarray, np.ndarray]
         m = arr.max()
         if m > 0:
             arr /= m
+    if with_low_level:
+        level = M[:, np.fft.rfftfreq(NFFT, 1.0 / sr) < 150].sum(axis=1)
+        level = level / (level.max() + 1e-9)
+        return full.astype(np.float32), low.astype(np.float32), level.astype(np.float32)
     return full.astype(np.float32), low.astype(np.float32)
 
 
@@ -111,8 +117,9 @@ def analyze_track(path: Path, max_seconds: float = 600.0) -> dict:
 def analyze_signal(y: np.ndarray, sr: int = SR) -> dict:
     duration = len(y) / sr
     if duration < 1.0 or float(np.abs(y).max(initial=0)) < 1e-4:
-        return {"duration": duration, "bpm": 0.0, "beats": [], "strong": [], "bass": [], "energy": [], "confidence": 0.0}
-    env, low = onset_envelope(y, sr)
+        return {"duration": duration, "bpm": 0.0, "beats": [], "strong": [], "bass": [], "energy": [],
+                "downbeats": [], "drops": [], "confidence": 0.0}
+    env, low, level = onset_envelope(y, sr, with_low_level=True)
     bpm = estimate_tempo(env, sr)
     # fold into 70..180 range typical for edits
     while bpm < 70:
@@ -137,6 +144,10 @@ def analyze_signal(y: np.ndarray, sr: int = SR) -> dict:
     win = sr
     nsec = int(len(y) // win)
     energy = [round(float(np.sqrt(np.mean(y[i * win:(i + 1) * win] ** 2))), 5) for i in range(nsec)]
+    # bass level just after each beat (kick body), max over ~60 ms
+    lvl = np.array([float(level[i:i + 3].max()) for i in idx]) if len(idx) else np.array([])
+    downbeats = _downbeats(beats, strength, lvl)
+    drops = _drops(energy, downbeats or [float(b) for b in beats])
     return {
         "duration": round(duration, 3),
         "bpm": round(float(bpm), 2),
@@ -144,8 +155,41 @@ def analyze_signal(y: np.ndarray, sr: int = SR) -> dict:
         "strong": strong,
         "bass": bass_hits,
         "energy": energy,
+        "downbeats": [round(float(b), 3) for b in downbeats],
+        "drops": drops,
         "confidence": round(conf, 3),
     }
+
+
+def _downbeats(beats: np.ndarray, strength: np.ndarray, bass_level: np.ndarray) -> list[float]:
+    """Assume 4/4: the bar phase whose beats carry the loudest kick (plus onset strength) is beat 1."""
+    if len(beats) < 8:
+        return [float(b) for b in beats]
+    score = 0.5 * strength + 2.0 * bass_level
+    best = max(range(4), key=lambda p: float(np.mean(score[p::4])))
+    return [float(b) for b in beats[best::4]]
+
+
+def _drops(energy: list[float], grid: list[float], top: int = 3) -> list[float]:
+    """Seconds where loudness jumps (the 'drop'), snapped to the nearest bar start."""
+    e = np.asarray(energy, dtype=np.float64)
+    if len(e) < 8 or not grid or e.max() <= 0:
+        return []
+    jumps = []
+    for i in range(3, len(e) - 2):
+        before, after = e[i - 3:i - 1].mean(), e[i:i + 2].mean()
+        jump = (after - before) / (e.max() + 1e-9)
+        if jump > 0.15 and after > np.median(e):
+            jumps.append((jump, float(i)))
+    jumps.sort(reverse=True)
+    out: list[float] = []
+    for _, t in jumps:
+        snap = min(grid, key=lambda b: abs(b - t))
+        if abs(snap - t) <= 1.5 and all(abs(snap - o) > 4 for o in out):
+            out.append(round(snap, 3))
+        if len(out) >= top:
+            break
+    return out
 
 
 def grid_beats(bpm: float, duration: float, offset: float = 0.0) -> list[float]:

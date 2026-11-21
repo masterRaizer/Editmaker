@@ -27,20 +27,32 @@ jobs:
       - name: Install Python dependencies
         run: python -m pip install -r requirements-build.txt
 
-      - name: Download ffmpeg 7.1 (BtbN, win64, GPL, NVENC)
+      - name: Download ffmpeg (BtbN win64 GPL with NVENC, fallback gyan.dev)
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           New-Item -ItemType Directory -Force packaging/ffmpeg, build/ff | Out-Null
-          gh release download latest -R BtbN/FFmpeg-Builds -p "ffmpeg-n7.1-latest-win64-gpl-7.1.zip" -D build/ff
+          $assets = (gh release view latest -R BtbN/FFmpeg-Builds --json assets | ConvertFrom-Json).assets.name
+          $assets | Where-Object { $_ -like "*win64-gpl*" } | ForEach-Object { "asset: $_" }
+          # newest stable branch (n7.1, n8.0, ...), static GPL build; master build as second choice
+          $stable = $assets | Where-Object { $_ -match '^ffmpeg-n(\d+)\.(\d+)-latest-win64-gpl-\d+\.\d+\.zip$' } |
+            Sort-Object { [int]($_ -replace '^ffmpeg-n(\d+)\.(\d+).*$', '$1') * 100 + [int]($_ -replace '^ffmpeg-n(\d+)\.(\d+).*$', '$2') } -Descending
+          $pick = @($stable) + @($assets | Where-Object { $_ -match '^ffmpeg-master-latest-win64-gpl\.zip$' }) | Select-Object -First 1
+          if ($pick) {
+            "using BtbN asset: $pick"
+            gh release download latest -R BtbN/FFmpeg-Builds -p $pick -D build/ff
+          }
           if (-not (Get-ChildItem build/ff/*.zip -ErrorAction SilentlyContinue)) {
-            gh release download latest -R BtbN/FFmpeg-Builds -p "ffmpeg-n7*-latest-win64-gpl-7*.zip" -D build/ff
+            "BtbN asset not found, falling back to gyan.dev release essentials"
+            Invoke-WebRequest https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip -OutFile build/ff/ffmpeg.zip
           }
           $zip = Get-ChildItem build/ff/*.zip | Select-Object -First 1
           Expand-Archive $zip.FullName -DestinationPath build/ff/x -Force
           Get-ChildItem build/ff/x -Recurse -Include ffmpeg.exe, ffprobe.exe | Copy-Item -Destination packaging/ffmpeg
+          if (-not (Test-Path packaging/ffmpeg/ffmpeg.exe)) { throw "ffmpeg.exe not found in archive" }
           packaging/ffmpeg/ffmpeg.exe -hide_banner -version | Select-Object -First 1
+          packaging/ffmpeg/ffmpeg.exe -hide_banner -encoders | Select-String nvenc
 
       - name: Tests on Windows (bundled ffmpeg)
         shell: pwsh

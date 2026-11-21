@@ -122,3 +122,42 @@ def test_metadata_generation():
     assert "#animeedit" in tt["hashtags"]
     assert all(h.startswith("#") for h in tt["hashtags"])
     assert yt["privacy"] == "unlisted" and tt["mode"] == "draft"
+
+
+def test_downbeats_and_drop(tmp_path):
+    from src.core import ffmpeg as ff
+    # kick every 0.5 s, accented every 2 s (bar start), quiet until 12 s then loud → drop at 12 s
+    expr = ("0.9*sin(2*PI*(55+80*exp(-mod(t,0.5)*30))*t)*exp(-mod(t,0.5)*12)"
+            "*(1+1.5*lt(mod(t,2),0.5))*if(gt(t,12),1,0.25)")
+    p = tmp_path / "drop.wav"
+    ff.run(["-f", "lavfi", "-i", f"aevalsrc='{expr}':s=44100:d=30", str(p)])
+    a = audio.analyze_track(p)
+    phase = [d % 2.0 for d in a["downbeats"][1:-1]]
+    assert all(min(x, 2 - x) < 0.08 for x in phase), a["downbeats"][:6]
+    assert a["drops"] and abs(a["drops"][0] - 12.0) < 0.6
+
+
+def test_effects_in_plans(media_dir):
+    srcs = _sources(media_dir)
+    track = {"path": str(media_dir["beat"]), "title": "beat", "analysis": audio.analyze_track(media_dir["beat"])}
+    ramps = glitch = impacts = 0
+    for seed in range(1, 8):
+        p = planner.build_plan(srcs, "drop", seed, 10.0, track, True, 2.0)
+        types = [s["transition_in"]["type"] for s in p["segments"]]
+        assert all(a != b or a == "cut" for a, b in zip(types, types[1:])), types
+        for s in p["segments"]:
+            if s["speed"]:
+                ramps += 1
+                sp = s["speed"]
+                o = s["clip_dur"] * sp["split"]
+                assert abs(s["src_dur"] - (o * sp["s1"] + (s["clip_dur"] - o) * sp["s2"])) < 0.01
+            else:
+                assert s["src_dur"] == s["clip_dur"]
+            glitch += len(s["glitch"])
+            impacts += len(s["impact"])
+            assert s["transition_out"]["type"]
+    assert ramps and glitch and impacts
+    calm = planner.build_plan(srcs, "drop", 1, 10.0, track, True, 2.0, intensity=0.5)
+    assert calm["effects"]["shake_px"] < planner.STYLES["drop"]["shake"]
+    # no ramps without music (source audio would drift)
+    assert not any(s["speed"] for s in planner.build_plan(srcs, "flow", 2, 10.0, None, True, 2.0)["segments"])

@@ -16,10 +16,11 @@ STYLES: dict[str, dict] = {
         "name": "Cold / Dexter Pace",
         "grid_bpm": 90,
         "beats_per_cut": [2, 4, 4, 8],
-        "transitions": [("cut", 0.0)] * 5 + [("fadeblack", 0.35), ("zoomin", 0.3), ("fade", 0.3)],
+        "transitions": [("cut", 0.0)] * 5 + [("fadeblack", 0.35), ("zoomin", 0.3), ("fade", 0.3), ("smoothleft", 0.25)],
         "zoom": "push",           # slow push-in each shot
         "shake": 0.0,
         "flash": 0.0,
+        "ramp": 0.15, "ramp_shape": "slow_in", "glitch": False, "impact": False, "grain": 0.6,
         "contrast": 1.08,
         "motion_target": 0.12,    # prefers calm, tense shots
         "music_section": "intro",
@@ -28,11 +29,12 @@ STYLES: dict[str, dict] = {
         "name": "High-Impact Beat / Drop",
         "grid_bpm": 140,
         "beats_per_cut": [1, 2, 2],
-        "transitions": [("cut", 0.0)] * 3 + [("slideleft", 0.12), ("slideright", 0.12), ("slideup", 0.12),
-                                              ("zoomin", 0.15), ("fadewhite", 0.1)],
+        "transitions": [("cut", 0.0)] * 3 + [("slideleft", 0.14), ("slideright", 0.14), ("slideup", 0.14),
+                                              ("slidedown", 0.14), ("zoomin", 0.16), ("fadewhite", 0.1)],
         "zoom": "punch",          # punch-in on each cut + pulse on bass
         "shake": 12.0,            # px at 1080 wide
         "flash": 0.10,
+        "ramp": 0.45, "ramp_shape": "fast_out", "glitch": True, "impact": True, "grain": 0.0,
         "contrast": 1.15,
         "motion_target": 0.6,
         "music_section": "peak",
@@ -42,10 +44,11 @@ STYLES: dict[str, dict] = {
         "grid_bpm": 100,
         "beats_per_cut": [4, 4, 8],
         "transitions": [("fade", 0.5), ("smoothleft", 0.45), ("smoothup", 0.45), ("circleopen", 0.5),
-                        ("hblur", 0.4), ("dissolve", 0.5)],
+                        ("hblur", 0.4), ("dissolve", 0.5), ("zoomin", 0.4)],
         "zoom": "drift",          # alternating slow in/out
         "shake": 0.0,
         "flash": 0.0,
+        "ramp": 0.5, "ramp_shape": "slow_out", "glitch": False, "impact": False, "grain": 0.4,
         "contrast": 1.05,
         "motion_target": 0.25,
         "music_section": "middle",
@@ -54,10 +57,11 @@ STYLES: dict[str, dict] = {
         "name": "Fast Hook / Retention Cut",
         "grid_bpm": 128,
         "beats_per_cut": [1, 2],
-        "transitions": [("cut", 0.0)] * 4 + [("zoomin", 0.12), ("slideleft", 0.1), ("fadewhite", 0.08)],
+        "transitions": [("cut", 0.0)] * 4 + [("zoomin", 0.12), ("slideleft", 0.12), ("slideup", 0.12), ("fadewhite", 0.08)],
         "zoom": "punch",
         "shake": 7.0,
         "flash": 0.07,
+        "ramp": 0.3, "ramp_shape": "fast_out", "glitch": True, "impact": True, "grain": 0.0,
         "contrast": 1.12,
         "motion_target": 0.5,
         "music_section": "peak",
@@ -78,9 +82,17 @@ class SourceInfo:
 
 
 def _music_start(beats: list[float], energy: list[float], length: float, section: str, track_dur: float,
-                 rng: random.Random) -> float:
-    """Choose the beat where the music excerpt starts."""
-    candidates = [b for b in beats if b + length <= track_dur + 0.01] or beats[:1] or [0.0]
+                 rng: random.Random, downbeats: list[float] | None = None, drops: list[float] | None = None,
+                 hook: float = 1.2) -> float:
+    """Choose the beat where the music excerpt starts: always a bar start when downbeats are known."""
+    grid = downbeats if downbeats and len(downbeats) >= 4 else beats
+    candidates = [b for b in grid if b + length <= track_dur + 0.01] or grid[:1] or [0.0]
+    if section == "peak" and drops:
+        # put the biggest drop of the track right after the hook (≈1.2–3 s into the edit)
+        for d in drops:
+            fit = [b for b in candidates if hook * 0.8 <= d - b <= hook + 2.5]
+            if fit:
+                return max(fit)
     if section == "intro" or not energy:
         # skip a silent lead-in: first beat after 1 s, or the first beat
         late = [b for b in candidates if b >= 1.0]
@@ -148,6 +160,11 @@ def _score_window(an: dict | None, start: float, dur: float, target_motion: floa
     mean_m = sum(m) / len(m)
     mean_l = sum(lum) / len(lum) if lum else 128
     score = 1.0 - min(1.0, abs(mean_m - target_motion) / max(target_motion, 0.3))
+    det = an.get("detail")
+    if det:
+        d = det[a:b]
+        if d:
+            score += 0.35 * (sum(d) / len(d))   # prefer sharp, detailed frames
     if mean_l < 14:          # near-black frames
         score -= 0.8
     if mean_l > 245:         # blown out / white flash
@@ -170,6 +187,7 @@ class _Picker:
         self.last_src: int | None = None
 
     def pick(self, dur: float, prefer_max: bool = False) -> tuple[SourceInfo, float]:
+        """dur = seconds of SOURCE footage needed (differs from screen time when the speed is ramped)."""
         cands = []
         for s in self.sources:
             if s.duration <= dur:
@@ -198,16 +216,29 @@ class _Picker:
         return s, st
 
 
+def _ramp(shape: str, vis: float) -> dict | None:
+    """Speed ramp over a segment: screen time split at `split`, speed s1 before, s2 after."""
+    if shape == "fast_out":      # slow motion after the hit, then rush into the next cut
+        return {"split": 0.55, "s1": 0.55, "s2": 1.7}
+    if shape == "slow_out":      # quick start, eases into slow motion
+        return {"split": 0.4, "s1": 1.5, "s2": 0.65}
+    if shape == "slow_in":       # cold: a held slow push
+        return {"split": 1.0, "s1": 0.75, "s2": 0.75}
+    return None
+
+
 def build_plan(sources: list[SourceInfo], style_key: str, seed: int, target_duration: float,
-               track: dict | None, outro: bool, outro_duration: float) -> dict:
+               track: dict | None, outro: bool, outro_duration: float, intensity: float = 1.0) -> dict:
     style = STYLES[style_key]
+    intensity = max(0.3, min(1.6, float(intensity)))
     rng = random.Random(seed * 7919 + STYLE_ORDER.index(style_key) if style_key in STYLE_ORDER else seed)
     music = None
     if track and track.get("analysis", {}).get("beats"):
         an = track["analysis"]
         beats_abs = an["beats"]
         start = _music_start(beats_abs, an.get("energy", []), target_duration, style["music_section"],
-                             an.get("duration", 0), rng)
+                             an.get("duration", 0), rng, an.get("downbeats"), an.get("drops"),
+                             style.get("hook_seconds", 1.2))
         beats = [round(b - start, 3) for b in beats_abs if b >= start - 1e-6]
         strong = [round(b - start, 3) for b in an.get("strong", []) if b >= start]
         bass = [round(b - start, 3) for b in an.get("bass", []) if b >= start]
@@ -231,6 +262,10 @@ def build_plan(sources: list[SourceInfo], style_key: str, seed: int, target_dura
         seg_before = boundaries[k] - boundaries[k - 1]
         seg_after = boundaries[k + 1] - boundaries[k]
         t, d = rng.choice(style["transitions"])
+        for _ in range(4):  # never the same non-cut transition twice in a row
+            if t == "cut" or t != trans[-1][0]:
+                break
+            t, d = rng.choice(style["transitions"])
         if style.get("hook_seconds") and boundaries[k] < style["hook_seconds"]:
             t, d = "cut", 0.0
         d = min(d, seg_before * 0.6, seg_after * 0.6)
@@ -238,6 +273,16 @@ def build_plan(sources: list[SourceInfo], style_key: str, seed: int, target_dura
             t, d = "cut", 0.0
         trans.append((t, round(d, 3)))
     outro_fade = 0.5 if outro else 0.0
+    # the "drop": strongest accent early in the edit → impact frame + glitch
+    impact_t = None
+    if style["impact"]:
+        drops_rel = [round(d - music["start"], 3) for d in (track or {}).get("analysis", {}).get("drops", [])
+                     if music and 0.3 <= d - music["start"] <= main_dur - 0.3]
+        early = [b for b in strong if 0.4 <= b <= max(2.5, main_dur / 3)]
+        if drops_rel:
+            impact_t = min(beats, key=lambda b: abs(b - drops_rel[0])) if beats else drops_rel[0]
+        elif early or strong:
+            impact_t = (early or strong)[0]
 
     picker = _Picker(sources, style, rng)
     segments = []
@@ -247,8 +292,17 @@ def build_plan(sources: list[SourceInfo], style_key: str, seed: int, target_dura
         d_in = trans[k][1]
         d_out = trans[k + 1][1] if k + 1 < n else outro_fade
         clip_dur = round((b1 - b0) + d_in / 2 + d_out / 2, 3)
+        speed = None
+        # speed ramps only over music: with the source's own audio the speech would drift out of sync
+        if music and b1 - b0 >= 0.5 and rng.random() < style["ramp"] * min(1.0, intensity):
+            speed = _ramp(style["ramp_shape"], b1 - b0)
+        if speed:
+            o = clip_dur * speed["split"]
+            src_dur = round(o * speed["s1"] + (clip_dur - o) * speed["s2"], 3)
+        else:
+            src_dur = clip_dur
         prefer_max = bool(style.get("hook_seconds")) and k == 0
-        src, st = picker.pick(clip_dur, prefer_max=prefer_max)
+        src, st = picker.pick(src_dur, prefer_max=prefer_max)
         out_start = b0 - d_in / 2
         local = lambda ts: [round(t - out_start, 3) for t in ts if b0 - 0.01 <= t < b1 - 0.05]  # noqa: E731
         flash = local(strong) if style["flash"] else []
@@ -260,6 +314,13 @@ def build_plan(sources: list[SourceInfo], style_key: str, seed: int, target_dura
         zoom_mode = style["zoom"]
         if zoom_mode == "drift":
             zoom_mode = "drift_in" if k % 2 == 0 else "drift_out"
+        glitch = []
+        if style["glitch"]:
+            for t in local(strong):
+                if not glitch or t - glitch[-1] >= 0.9:
+                    glitch.append(t)
+        impact = local([impact_t]) if impact_t is not None else []
+        t_out = trans[k + 1] if k + 1 < n else (("fadeblack", outro_fade) if outro_fade else ("cut", 0.0))
         segments.append({
             "k": k,
             "source_id": src.id,
@@ -268,6 +329,11 @@ def build_plan(sources: list[SourceInfo], style_key: str, seed: int, target_dura
             "has_audio": src.has_audio,
             "src_start": round(st, 3),
             "clip_dur": clip_dur,
+            "src_dur": src_dur,
+            "speed": speed,
+            "transition_out": {"type": t_out[0], "dur": t_out[1]},
+            "glitch": glitch,
+            "impact": impact,
             "out_start": round(b0, 3),
             "out_end": round(b1, 3),
             "transition_in": {"type": trans[k][0], "dur": d_in},
@@ -290,7 +356,9 @@ def build_plan(sources: list[SourceInfo], style_key: str, seed: int, target_dura
         "boundaries": boundaries,
         "beats": beats_in,
         "strong": [b for b in strong if b <= main_dur],
-        "effects": {"shake_px": style["shake"], "flash": style["flash"], "contrast": style["contrast"]},
+        "effects": {"shake_px": style["shake"] * intensity, "flash": min(0.18, style["flash"] * intensity),
+                    "contrast": style["contrast"], "grain": style["grain"], "intensity": intensity},
+        "impact_time": impact_t,
         "segments": segments,
         "cuts": max(0, len(segments) - 1),
         "avg_shot": round(main_dur / max(1, len(segments)), 3),
