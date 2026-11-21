@@ -5,6 +5,11 @@ on:
     branches: ["**"]
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      release:
+        description: "Publish a GitHub Release v<version> with the msi and exe"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -114,11 +119,14 @@ jobs:
             dist/EditMaker-*-portable.exe
           if-no-files-found: error
 
-      - name: GitHub Release (tags v*)
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: GitHub Release (tag v* or manual run with release=true)
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.release
         uses: softprops/action-gh-release@v2
         with:
-          name: EditMaker ${{ github.ref_name }}
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v{0}', env.VERSION) }}
+          target_commitish: ${{ github.sha }}
+          name: EditMaker ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v{0}', env.VERSION) }}
+          make_latest: true
           body_path: docs/RELEASE_NOTES.md
           files: |
             dist/EditMaker-*-x64.msi
