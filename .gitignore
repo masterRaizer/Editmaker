@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+data/
+secrets/
+output/
+*.db
+music_library/**/*.mp3
+music_library/**/*.wav
+music_library/**/*.flac
+music_library/**/*.m4a
+music_library/**/*.ogg
+!music_library/**/.gitkeep
+.venv/

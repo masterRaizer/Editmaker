@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EditMaker</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="top">
+  <span class="brand">EditMaker</span>
+  <label class="sr" for="projectSelect">Проект</label>
+  <select id="projectSelect"></select>
+  <span id="jobState" class="jobstate" hidden></span>
+  <span id="envState" class="env mono"></span>
+</header>
+
+<main class="work">
+  <!-- 1. Sources, folders, music, watermark, format -->
+  <section class="panel setup" aria-label="Настройки эдита">
+    <div class="group">
+      <h2>Исходники</h2>
+      <ul id="folderList" class="paths"></ul>
+      <div class="row">
+        <button type="button" data-pick="source">Добавить папку</button>
+        <button type="button" id="scanSources">Сканировать</button>
+      </div>
+      <div id="clipEmpty" class="empty">Добавьте папку на SSD с видео (.mp4, .mkv, .webm, .mov) и нажмите «Сканировать».</div>
+      <div id="clipBox" hidden>
+        <label class="check"><input type="checkbox" id="clipAll"> Все клипы</label>
+        <ul id="clipList" class="clips"></ul>
+      </div>
+    </div>
+
+    <div class="group">
+      <h2>Папка вывода</h2>
+      <div class="pathfield">
+        <label class="sr" for="outputFolder">Папка вывода</label>
+        <input id="outputFolder" class="mono" spellcheck="false">
+        <button type="button" data-pick="output">Выбрать</button>
+      </div>
+    </div>
+
+    <div class="group">
+      <h2>Музыка</h2>
+      <label for="vibe">Вайб</label>
+      <select id="vibe"></select>
+      <label for="track">Трек</label>
+      <select id="track"></select>
+      <div class="row">
+        <button type="button" id="scanMusic">Сканировать музыку</button>
+        <button type="button" data-pick="track">Файл трека</button>
+      </div>
+      <p id="musicHint" class="hint" hidden>В music_library/ нет треков. Будет использован звук исходника с нормализацией до −14 LUFS. Положите треки в папки вайбов и нажмите «Сканировать музыку».</p>
+    </div>
+
+    <div class="group">
+      <h2>Водяной знак</h2>
+      <div class="seg" role="radiogroup" aria-label="Тип водяного знака">
+        <label><input type="radio" name="wmType" value="text" checked> Текст</label>
+        <label><input type="radio" name="wmType" value="image"> PNG</label>
+      </div>
+      <div id="wmTextBox">
+        <label for="wmText">Водяной знак</label>
+        <input id="wmText" placeholder="@никнейм">
+      </div>
+      <div id="wmImageBox" hidden>
+        <label for="wmImage">Водяной знак (PNG с прозрачностью)</label>
+        <div class="pathfield">
+          <input id="wmImage" class="mono" spellcheck="false">
+          <button type="button" data-pick="png">Выбрать</button>
+        </div>
+      </div>
+      <div class="grid2">
+        <div>
+          <label for="wmPos">Позиция</label>
+          <select id="wmPos">
+            <option value="bottom_right">Снизу справа</option>
+            <option value="bottom_left">Снизу слева</option>
+            <option value="bottom_center">Снизу по центру</option>
+            <option value="top_right">Сверху справа</option>
+            <option value="top_left">Сверху слева</option>
+          </select>
+        </div>
+        <div>
+          <label for="wmColor">Цвет</label>
+          <input id="wmColor" type="color" value="#ffffff">
+        </div>
+        <div>
+          <label for="wmOpacity">Прозрачность <output id="wmOpacityOut" class="mono"></output></label>
+          <input id="wmOpacity" type="range" min="0.1" max="1" step="0.05">
+        </div>
+        <div>
+          <label for="wmSize">Размер <output id="wmSizeOut" class="mono"></output></label>
+          <input id="wmSize" type="range" min="0.02" max="0.12" step="0.005">
+        </div>
+      </div>
+      <label class="check"><input type="checkbox" id="wmIn"> В ролике</label>
+      <label class="check"><input type="checkbox" id="wmOutro"> В конце ролика</label>
+      <label class="check"><input type="checkbox" id="wmDrift"> Плавный сдвиг (защита от кропа)</label>
+    </div>
+
+    <div class="group">
+      <h2>Формат</h2>
+      <div class="grid2">
+        <div>
+          <label for="resolution">Разрешение</label>
+          <select id="resolution">
+            <option value="1080x1920">1080×1920</option>
+            <option value="1920x1080">1920×1080</option>
+            <option value="2160x3840">2160×3840 (4K)</option>
+            <option value="3840x2160">3840×2160 (4K)</option>
+          </select>
+        </div>
+        <div>
+          <label for="fps">Кадров/с</label>
+          <select id="fps"><option>60</option><option>30</option></select>
+        </div>
+        <div>
+          <label for="duration">Длина, с</label>
+          <input id="duration" type="number" min="6" max="90" step="1">
+        </div>
+        <div>
+          <label for="variantCount">Вариантов</label>
+          <input id="variantCount" type="number" min="1" max="8" step="1">
+        </div>
+        <div>
+          <label for="quality">Качество</label>
+          <select id="quality">
+            <option value="final">Финал (CRF 16)</option>
+            <option value="draft">Черновик</option>
+          </select>
+        </div>
+        <div>
+          <label for="encoder">Кодек</label>
+          <select id="encoder">
+            <option value="auto">Авто</option>
+            <option value="libx264">libx264</option>
+            <option value="h264_nvenc">NVENC</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <div class="group create">
+      <label for="projectName">Название проекта</label>
+      <input id="projectName" placeholder="Название тайтла">
+      <button type="button" id="createBtn" class="primary">Создать варианты</button>
+      <p id="createError" class="error" hidden></p>
+    </div>
+  </section>
+
+  <!-- 2. Preview -->
+  <section class="panel preview" aria-label="Предпросмотр">
+    <div id="previewEmpty" class="empty big">Выберите исходники слева и нажмите «Создать варианты». Здесь появятся варианты монтажа.</div>
+    <div id="previewBox" hidden>
+      <div class="tabs" role="tablist" id="variantTabs"></div>
+      <div class="stage">
+        <video id="player" controls playsinline preload="metadata"></video>
+        <div id="renderState" class="renderstate" hidden>
+          <div class="bar"><span id="renderBar"></span></div>
+          <span id="renderText" class="mono"></span>
+        </div>
+      </div>
+      <canvas id="timeline" height="56" aria-label="Биты и склейки"></canvas>
+      <dl id="variantInfo" class="info"></dl>
+      <p id="variantError" class="error" hidden></p>
+      <div class="row">
+        <button type="button" id="moreBtn">Ещё 2 варианта</button>
+        <button type="button" id="rerenderBtn">Перерендерить</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- 3. Metadata + approval gate -->
+  <section class="panel meta" aria-label="Метаданные и одобрение">
+    <div id="metaEmpty" class="empty">Метаданные появятся после рендера варианта.</div>
+    <form id="metaForm" hidden>
+      <fieldset class="platforms">
+        <legend>Платформы</legend>
+        <label class="check"><input type="checkbox" name="platform" value="youtube"> YouTube</label>
+        <label class="check"><input type="checkbox" name="platform" value="tiktok"> TikTok</label>
+      </fieldset>
+
+      <h2>YouTube</h2>
+      <label for="ytTitle">Заголовок <output class="count mono" data-for="ytTitle" data-max="100"></output></label>
+      <input id="ytTitle" maxlength="100">
+      <label for="ytDesc">Описание</label>
+      <textarea id="ytDesc" rows="5"></textarea>
+      <label for="ytTags">Теги через запятую <output class="count mono" data-for="ytTags" data-max="500"></output></label>
+      <textarea id="ytTags" rows="2"></textarea>
+      <label for="ytPrivacy">Доступ</label>
+      <select id="ytPrivacy">
+        <option value="private">Ограниченный доступ</option>
+        <option value="unlisted">По ссылке</option>
+        <option value="public">Открытый</option>
+      </select>
+
+      <h2>TikTok</h2>
+      <label for="ttTitle">Подпись</label>
+      <input id="ttTitle">
+      <label for="ttDesc">Описание</label>
+      <textarea id="ttDesc" rows="4"></textarea>
+      <label for="ttTags">Хештеги</label>
+      <textarea id="ttTags" rows="2"></textarea>
+      <div class="grid2">
+        <div>
+          <label for="ttMode">Режим</label>
+          <select id="ttMode">
+            <option value="draft">Черновик в TikTok</option>
+            <option value="direct">Опубликовать сразу</option>
+          </select>
+        </div>
+        <div>
+          <label for="ttPrivacy">Видимость</label>
+          <select id="ttPrivacy">
+            <option value="SELF_ONLY">Только я</option>
+            <option value="MUTUAL_FOLLOW_FRIENDS">Друзья</option>
+            <option value="FOLLOWER_OF_CREATOR">Подписчики</option>
+            <option value="PUBLIC_TO_EVERYONE">Все</option>
+          </select>
+        </div>
+      </div>
+
+      <label for="disclaimer">Приписка</label>
+      <textarea id="disclaimer" rows="2"></textarea>
+
+      <div class="row">
+        <button type="submit">Сохранить</button>
+        <button type="button" id="regenBtn">Сгенерировать заново</button>
+      </div>
+
+      <div class="gate">
+        <p id="gateText" class="gatetext"></p>
+        <div class="row">
+          <button type="button" id="approveBtn" class="primary">Одобрить</button>
+          <button type="button" id="unapproveBtn" hidden>Снять одобрение</button>
+        </div>
+        <button type="button" id="publishBtn" class="publish" disabled>Опубликовать одобренное</button>
+        <p id="publishError" class="error" hidden></p>
+        <ul id="pubList" class="pubs"></ul>
+      </div>
+    </form>
+
+    <div class="group accounts">
+      <h2>Аккаунты</h2>
+      <div id="authBox"></div>
+    </div>
+  </section>
+</main>
+
+<dialog id="picker">
+  <form method="dialog" class="pickerform">
+    <h2 id="pickerTitle">Выбор папки</h2>
+    <div class="pathfield">
+      <label class="sr" for="pickerPath">Путь</label>
+      <input id="pickerPath" class="mono" spellcheck="false">
+      <button type="button" id="pickerGo">Открыть</button>
+    </div>
+    <ul id="pickerList" class="pickerlist"></ul>
+    <p id="pickerError" class="error" hidden></p>
+    <div class="row end">
+      <button value="cancel">Отмена</button>
+      <button type="button" id="pickerOk" class="primary">Выбрать эту папку</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
