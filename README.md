@@ -2,12 +2,26 @@
 
 Локальная утилита для аниме- и dark-эдитов: исходники с SSD → 4 варианта монтажа под бит → водяной знак в ролике и в конце → ручное одобрение → публикация на YouTube и TikTok.
 
-## Запуск
+## Windows: .exe и .msi
+
+Сборки делает GitHub Actions (`.github/workflows/windows-build.yml`) на каждый push:
+
+- `EditMaker-<версия>-x64.msi` — установка в `C:\Program Files\EditMaker`, ярлыки в «Пуске» и на рабочем столе;
+- `EditMaker-<версия>-portable.exe` — один файл без установки.
+
+ffmpeg 7.1 с NVENC уже внутри. Окно приложения работает на WebView2 (есть в Windows 10/11); без него интерфейс откроется в браузере. Данные — `%APPDATA%\EditMaker\data`, ключи — `%APPDATA%\EditMaker\secrets`, музыка — `%USERPROFILE%\Music\EditMaker\music_library`, вывод по умолчанию — `%USERPROFILE%\Videos\EditMaker`.
+
+Скачать: Actions → «Windows build (exe + msi)» → последний зелёный запуск → Artifacts. Для тега `v*` файлы публикуются в Releases. Пошаговая установка и проверка на ноутбуке — [docs/LAPTOP_AGENT_PROMPT.md](docs/LAPTOP_AGENT_PROMPT.md).
+
+Консольные команды есть и в собранной программе: `EditMaker.exe check`, `EditMaker.exe selftest <папка>`; вывод пишется в `%APPDATA%\EditMaker\data\cli.log`.
+
+## Запуск из исходников
 
 ```bash
 pip install -r requirements.txt      # Python 3.11+, ffmpeg и ffprobe в PATH
 python run.py check                  # ffmpeg, ffprobe, NVENC/GPU
-python run.py                        # UI: http://127.0.0.1:8765
+python run.py                        # UI в браузере: http://127.0.0.1:8765
+python run.py --desktop              # UI в отдельном окне (pip install pywebview)
 python run.py selftest output/test   # синтетический клип + бит → 4 варианта без UI
 python -m pytest -q                  # тесты
 ```
@@ -26,7 +40,21 @@ python -m pytest -q                  # тесты
 
 Центр: вкладки вариантов со статусом (`draft`, `rendered`, `approved`, `published`, `failed`), плеер, полоса битов (серые — доли, высокие — сильные доли, красные — склейки, серый блок — концовка), тайминги, BPM, музыка, водяной знак, файл. «Ещё 2 варианта» добавляет варианты с новым сидом.
 
+Под плеером: щелчок по полосе битов — перемотка, ←/→ — к предыдущей или следующей склейке, 1–9 — вариант, пробел — пауза. «Сравнить два варианта» ставит второй плеер рядом, он повторяет паузу, воспроизведение и перемотку первого.
+
 Правая панель: заголовок, описание, теги для YouTube; подпись, описание, хештеги, режим и видимость для TikTok; приписка; выбор платформ. «Одобрить» фиксирует хеш файла и текста. «Опубликовать одобренное» доступно только после одобрения.
+
+## Доработка в редакторе
+
+Рендер делает ffmpeg без ручной работы. Чтобы довести эдит руками, у каждого варианта есть экспорт в `<проект>/export/variant_XX/`:
+
+| Кнопка | Что получится | Где открыть |
+|---|---|---|
+| DaVinci Resolve / Final Cut | `.fcpxml`: клипы встык по склейкам, музыка с метками долей, `beats.txt` | Resolve: File → Import → Timeline; Final Cut: File → Import → XML |
+| Premiere (EDL) | `.edl` CMX3600: видео и музыка, `beats.txt` | Premiere: File → Import; Resolve, Vegas, Avid |
+| Пакет для CapCut | клипы `01_…mp4` уже обрезаны, кадрированы и с грейдом, `music.wav`, `watermark.png`, `beats.txt`, инструкция | CapCut: импорт файлов по порядку имён |
+
+У CapCut нет импорта таймлайна, поэтому для него — пакет готовых нарезок. Переходы и эффекты в экспорт не входят, их добавляют в редакторе.
 
 ## Варианты монтажа
 
@@ -68,7 +96,9 @@ python -m pytest -q                  # тесты
 ## Структура
 
 ```
-run.py                      запуск UI, check, selftest
+run.py                      запуск из исходников (браузер, --desktop, check, selftest)
+src/cli.py                  команды check / selftest / serve
+src/desktop.py              окно pywebview + локальный сервер, родные диалоги Windows
 src/server.py               FastAPI: API + статика
 src/core/config.py          настройки, вайбы, разрешения
 src/core/db.py              SQLite: sources, tracks, projects, variants, publications, audit
@@ -81,7 +111,11 @@ src/core/render.py          filtergraph: zoompan, shake, вспышки, гре�
 src/core/watermark.py       водяной знак в ролике и в концовке
 src/core/metadata.py        заголовки, описания, приписка, теги и хештеги
 src/core/service.py         проекты, рендер-очередь, meta.json, одобрение, публикация
+src/core/export_nle.py      FCPXML, EDL, пакет для CapCut
+src/core/paths.py           пути: исходники или собранный .exe, встроенный ffmpeg
 src/core/synthetic.py       тестовые клипы и биты
+packaging/                  PyInstaller spec, генератор WiX (.msi), значок
+docs/LAPTOP_AGENT_PROMPT.md задание агенту на Windows-ноутбуке
 src/publishers/             youtube_publisher.py, tiktok_publisher.py
 web/                        index.html, app.css, app.js
 music_library/              dexter_cold_dark, dark_synth_tension, phonk_aggressive, moody_cinematic, custom

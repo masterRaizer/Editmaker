@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import media, metadata, music, planner, render, watermark
+from . import export_nle, ffmpeg as ff, media, metadata, music, planner, render, watermark
 from .config import RESOLUTIONS, VIBES, Settings
 from .db import DB
 from ..publishers.base import NotConfigured, PublishError, PublishRequest
@@ -537,9 +537,69 @@ class EditMaker:
             raise BadRequest("Неверный state OAuth — начните авторизацию заново")
         self.publishers[platform].exchange_code(code)
 
+    # ---------------------------------------------------------------- export to NLE / CapCut
+    EXPORT_FORMATS = ("fcpxml", "edl", "capcut")
+
+    def export_variant(self, vid: int, fmt: str) -> str:
+        if fmt not in self.EXPORT_FORMATS:
+            raise BadRequest(f"Формат экспорта: {', '.join(self.EXPORT_FORMATS)}")
+        v = self._get_variant(vid)
+        if not isinstance(v.get("plan"), dict):
+            raise BadRequest("Сначала дождитесь рендера варианта")
+        p = self.db.project(v["project_id"])
+        r = p["settings"]["render"]
+        out = Path(p["output_dir"]) / "export" / f"variant_{v['idx']:02d}"
+        name = f"{p['slug']}_v{v['idx']:02d}"
+
+        def work(report):
+            res = export_nle.export(v["plan"], out, fmt, resolution=r["resolution"], fps=int(r["fps"]),
+                                    vibe=v["plan"].get("vibe", "custom"), wm=p["settings"]["watermark"], name=name,
+                                    progress=lambda f: report(f, "экспорт"))
+            self.db.log(vid, "exported", res)
+            return res
+
+        title = {"fcpxml": "DaVinci / Final Cut", "edl": "EDL", "capcut": "пакет CapCut"}[fmt]
+        return self.jobs.submit("export", f"Экспорт {title} · вариант {v['idx']:02d}", work,
+                                ref={"project_id": p["id"], "variant_id": vid},
+                                pool="render" if fmt == "capcut" else "io")
+
+    def source_thumb(self, sid: int) -> Path:
+        rows = self.db.sources([sid])
+        if not rows:
+            raise NotFound(f"source {sid}")
+        src = rows[0]
+        thumbs = self.settings.data_dir / "thumbs"
+        thumbs.mkdir(exist_ok=True)
+        out = thumbs / f"{sid}_{int(src['mtime'] or 0)}.jpg"
+        if not out.is_file():
+            t = max(0.0, (src["duration"] or 0) * 0.25)
+            ff.run(["-ss", f"{t:.2f}", "-i", src["path"], "-frames:v", "1", "-vf", "scale=320:-2", "-q:v", "5", str(out)])
+        return out
+
     # ---------------------------------------------------------------- files
+    def open_in_explorer(self, path: str) -> None:
+        import os
+        import subprocess
+        import sys
+        p = Path(path)
+        target = p if p.is_dir() else p.parent
+        if not target.is_dir() or not (self.allowed_media(target) or self.allowed_media(p)):
+            raise BadRequest("Папка недоступна")
+        if sys.platform.startswith("win"):
+            if p.is_file():
+                subprocess.Popen(["explorer", "/select,", str(p)])
+            else:
+                os.startfile(str(target))  # noqa: S606 - local desktop app
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(target)])
+        else:
+            subprocess.Popen(["xdg-open", str(target)])
+
     def allowed_media(self, path: Path) -> bool:
         path = Path(path).resolve()
+        wm_img = self.settings.get()["watermark"].get("image_path")
+        if wm_img and path == Path(wm_img).resolve() and path.suffix.lower() == ".png":
+            return True  # live preview of the PNG watermark
         roots = [Path(p["output_dir"]).resolve() for p in self.db.projects()]
         roots += [Path(f).resolve() for f in self.settings.get()["source_folders"]]
         return any(path == r or r in path.parents for r in roots)

@@ -8,7 +8,9 @@ import platform
 import threading
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+from .paths import default_music_dir, default_output_dir, resource_root
+
+ROOT = resource_root()
 
 VIBES = {
     "dexter_cold_dark": "Dexter / Dark Cold",
@@ -29,8 +31,8 @@ RESOLUTIONS = {
 
 DEFAULTS: dict = {
     "source_folders": [],
-    "output_folder": str(ROOT / "output"),
-    "music_library": str(ROOT / "music_library"),
+    "output_folder": str(default_output_dir()),
+    "music_library": str(default_music_dir()),
     "render": {
         "resolution": "1080x1920",
         "fps": 60,

@@ -143,6 +143,32 @@ def create_app(data_dir: Optional[Path] = None, core: Optional[EditMaker] = None
     def publish(vid: int, body: dict = Body(default={})):
         return {"job": em.publish(vid, body.get("platforms"))}
 
+    @app.post("/api/variants/{vid}/export")
+    def export_variant(vid: int, body: dict = Body(...)):
+        return {"job": em.export_variant(vid, body.get("format", ""))}
+
+    @app.get("/api/sources/{sid}/thumb")
+    def source_thumb(sid: int):
+        try:
+            return FileResponse(em.source_thumb(sid), headers={"Cache-Control": "max-age=86400"})
+        except Exception:  # noqa: BLE001 - broken file → no thumbnail
+            raise HTTPException(404, "нет миниатюры")
+
+    @app.post("/api/open")
+    def open_path(body: dict = Body(...)):
+        em.open_in_explorer(body.get("path", ""))
+        return {"ok": True}
+
+    @app.post("/api/shutdown")
+    def shutdown():
+        """Browser mode: stop the local server from the UI."""
+        import threading
+        cb = getattr(app.state, "shutdown", None)
+        if cb:
+            threading.Timer(0.3, cb).start()
+            return {"ok": True}
+        raise HTTPException(400, "Выключение доступно только в настольном режиме")
+
     @app.get("/api/variants/{vid}/audit")
     def audit(vid: int):
         return em.db.audit(vid)

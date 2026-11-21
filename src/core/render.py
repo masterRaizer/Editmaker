@@ -177,6 +177,27 @@ def build_graph(plan: dict, *, W: int, H: int, fps: int, vibe: str, wm: dict, wm
     return ";\n".join(parts)
 
 
+def _place(tmp: Path, target: Path) -> Path:
+    """Move the finished file into place. On Windows the old file may be locked by the preview player
+    for a moment: retry, then fall back to variant_01_2.mp4, variant_01_3.mp4 …"""
+    import time
+    for _ in range(6):
+        try:
+            if target.exists():
+                target.unlink()
+            shutil.move(str(tmp), target)
+            return target
+        except PermissionError:
+            time.sleep(0.5)
+    n = 2
+    while True:
+        alt = target.with_name(f"{target.stem}_{n}{target.suffix}")
+        if not alt.exists():
+            shutil.move(str(tmp), alt)
+            return alt
+        n += 1
+
+
 def render(plan: dict, out_path: Path, *, resolution: str, fps: int, vibe: str, wm: dict, encoder: str,
            quality: str, loudness: float = -14.0, progress: Optional[Callable[[float], None]] = None) -> dict:
     W, H = RESOLUTIONS[resolution]
@@ -205,12 +226,12 @@ def render(plan: dict, out_path: Path, *, resolution: str, fps: int, vibe: str, 
                             loudness=loudness, music_input=music_input, image_input=image_input)
         (workdir / "graph.txt").write_text(graph, encoding="utf-8")
         tmp_out = workdir / "out.mp4"
-        args += ["-filter_complex_script", "graph.txt", "-map", "[vout]", "-map", "[aout]",
+        args += [*ffmpeg.filter_script_args("graph.txt"), "-map", "[vout]", "-map", "[aout]",
                  "-r", str(fps), *encoder_args(encoder, quality),
                  "-c:a", "aac", "-b:a", "320k", "-ar", "48000",
                  "-movflags", "+faststart", "-t", f"{plan['total_duration']:.3f}", str(tmp_out)]
         ffmpeg.run(args, total_seconds=plan["total_duration"], progress=progress, cwd=workdir)
-        shutil.move(str(tmp_out), out_path)
+        out_path = _place(tmp_out, out_path)
         thumb = out_path.with_suffix(".jpg")
         try:
             ffmpeg.run(["-ss", f"{min(1.0, plan['total_duration'] / 3):.2f}", "-i", str(out_path), "-frames:v", "1",

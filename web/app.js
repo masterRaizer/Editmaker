@@ -19,6 +19,24 @@ async function api(path, opts = {}) {
 const media = (p) => "/api/media?path=" + encodeURIComponent(p);
 const fmtTime = (s) => (s == null ? "—" : `${Math.floor(s / 60)}:${(s % 60).toFixed(2).padStart(5, "0")}`);
 const showErr = (el, e) => { el.textContent = e ? (e.message || String(e)) + (e.data && e.data.instructions ? "\n\n" + e.data.instructions : "") : ""; el.hidden = !e; };
+const native = () => (window.pywebview && window.pywebview.api) || null;
+function toast(text, kind = "", action = null) {
+  const el = document.createElement("div");
+  el.className = "toast " + kind;
+  el.innerHTML = `<span></span>`;
+  el.querySelector("span").textContent = text;
+  if (action) {
+    const b = document.createElement("button"); b.type = "button"; b.textContent = action.label;
+    b.onclick = () => { action.run(); el.remove(); };
+    el.appendChild(b);
+  }
+  const x = document.createElement("button"); x.type = "button"; x.textContent = "×"; x.setAttribute("aria-label", "Закрыть");
+  x.onclick = () => el.remove();
+  el.appendChild(x);
+  $("toasts").appendChild(el);
+  setTimeout(() => el.remove(), kind === "err" ? 15000 : 6000);
+}
+const reveal = (path) => api("/api/open", { method: "POST", body: { path } }).catch((e) => toast(e.message, "err"));
 const STATUS_RU = { draft: "draft", rendered: "rendered", approved: "approved", published: "published", failed: "failed" };
 
 /* ---------------------------------------------------------------- init */
@@ -32,7 +50,10 @@ async function init() {
   fillSetup();
   renderAuth(st.auth);
   await Promise.all([loadSources(), loadTracks(), loadProjects()]);
-  if (new URLSearchParams(location.search).get("auth")) history.replaceState(null, "", "/");
+  const q = new URLSearchParams(location.search);
+  if (q.get("auth")) { toast(q.get("auth") === "youtube" ? "YouTube подключён" : "TikTok подключён", "ok"); history.replaceState(null, "", q.get("browser") ? "/?browser=1" : "/"); }
+  $("quitBtn").hidden = !q.get("browser");
+  window.addEventListener("focus", async () => renderAuth((await api("/api/state")).auth));
   setInterval(pollJobs, 1200);
 }
 
@@ -50,12 +71,60 @@ function fillSetup() {
   $("variantCount").value = r.variants; $("quality").value = r.quality; $("encoder").value = r.encoder;
   syncWm();
 }
+function isLandscape() { const [w, h] = $("resolution").value.split("x").map(Number); return w > h; }
 
 function syncWm() {
   const img = document.querySelector("input[name=wmType]:checked").value === "image";
   $("wmTextBox").hidden = img; $("wmImageBox").hidden = !img;
   $("wmOpacityOut").textContent = Number($("wmOpacity").value).toFixed(2);
   $("wmSizeOut").textContent = Number($("wmSize").value).toFixed(3);
+  drawWmPreview();
+}
+
+/* Live preview with the same geometry the renderer uses (watermark.py): margins 5 % / 9 %,
+   text height = size × frame height, PNG width = size × 4 × frame width, outro text = 8.5 % of the short side. */
+function drawWmPreview() {
+  const wrap = document.querySelector(".wmpreview");
+  wrap.classList.toggle("landscape", isLandscape());
+  const frame = $("wmFrame"), outro = $("wmOutroFrame");
+  const first = S.sources.find((s) => S.selected.has(s.id)) || S.sources[0];
+  frame.style.backgroundImage = first ? `url(/api/sources/${first.id}/thumb)` : "";
+  frame.style.visibility = $("wmIn").checked ? "visible" : "hidden";
+  outro.hidden = !$("wmOutro").checked;
+  const fw = frame.clientWidth || 120, fh = frame.clientHeight || 213;
+  const ow = outro.clientWidth || fw, oh = outro.clientHeight || fh;
+  const wm = watermarkFromForm();
+  const mark = $("wmMark"), omark = $("wmOutroMark");
+  for (const el of [mark, omark]) { el.innerHTML = ""; el.style.cssText = ""; }
+  const content = (el) => {
+    if (wm.type === "image") {
+      if (!wm.image_path) return false;
+      const im = document.createElement("img");
+      im.src = "/api/media?path=" + encodeURIComponent(wm.image_path);
+      el.appendChild(im);
+    } else {
+      if (!wm.text.trim()) return false;
+      el.textContent = wm.text;
+      el.style.color = wm.color;
+    }
+    return true;
+  };
+  if (content(mark)) {
+    const portrait = fh > fw;
+    const mx = fw * 0.05, my = fh * (portrait ? 0.09 : 0.06);
+    if (wm.type === "image") mark.style.width = Math.max(8, fw * wm.size * 4) + "px";
+    else mark.style.fontSize = Math.max(6, fh * wm.size * (portrait ? 1 : 1.2)) + "px";
+    mark.style.opacity = wm.opacity;
+    const pos = wm.position;
+    if (pos.includes("left")) mark.style.left = mx + "px";
+    if (pos.includes("right")) mark.style.right = mx + "px";
+    if (pos === "bottom_center") { mark.style.left = "50%"; mark.style.transform = "translateX(-50%)"; }
+    if (pos.startsWith("top")) mark.style.top = my + "px"; else mark.style.bottom = my + "px";
+  }
+  if (content(omark)) {
+    if (wm.type === "image") omark.style.width = Math.min(ow, oh) * 0.5 + "px";
+    else omark.style.fontSize = Math.max(7, Math.min(ow, oh) * 0.085) + "px";
+  }
 }
 
 function watermarkFromForm() {
@@ -92,7 +161,8 @@ async function loadSources() {
   $("clipBox").hidden = S.sources.length === 0;
   for (const s of S.sources) {
     const li = document.createElement("li");
-    li.innerHTML = `<label><input type="checkbox"><span class="t"></span><span class="m"></span></label>`;
+    li.innerHTML = `<label><input type="checkbox"><img alt="" loading="lazy" src="/api/sources/${s.id}/thumb"><span class="t"></span><span class="m"></span></label>`;
+    li.querySelector("img").onerror = (e) => { e.target.style.visibility = "hidden"; };
     const cb = li.querySelector("input");
     cb.checked = S.selected.has(s.id);
     cb.onchange = () => { cb.checked ? S.selected.add(s.id) : S.selected.delete(s.id); syncAll(); };
@@ -103,7 +173,7 @@ async function loadSources() {
   }
   syncAll();
 }
-function syncAll() { $("clipAll").checked = S.sources.length > 0 && S.selected.size === S.sources.length; }
+function syncAll() { $("clipAll").checked = S.sources.length > 0 && S.selected.size === S.sources.length; drawWmPreview(); }
 
 /* ---------------------------------------------------------------- music */
 async function loadTracks() {
@@ -150,6 +220,7 @@ function jobFor(vid) { return S.jobs.find((j) => j.ref && j.ref.variant_id === v
 
 function renderProject() {
   const p = S.project;
+  $("openFolderBtn").hidden = !p;
   $("previewEmpty").hidden = !!(p && p.variants.length);
   $("previewBox").hidden = !(p && p.variants.length);
   if (!p) return;
@@ -168,6 +239,21 @@ function renderProject() {
     tabs.appendChild(b);
   }
   renderVariant();
+  renderCompare();
+}
+
+function renderCompare() {
+  const on = $("compareToggle").checked, p = S.project;
+  $("stage2").hidden = !on; $("stages").classList.toggle("two", on);
+  if (!on || !p) return;
+  const sel = $("compareSelect"), cur = sel.value;
+  const others = p.variants.filter((v) => v.id !== S.variantId && v.file_path && v.status !== "draft" && v.status !== "failed");
+  sel.innerHTML = others.map((v) => `<option value="${v.id}">${String(v.idx).padStart(2, "0")} ${escapeHtml(v.style_name)}</option>`).join("");
+  if (others.some((v) => String(v.id) === cur)) sel.value = cur;
+  const v2 = others.find((v) => String(v.id) === sel.value);
+  const p2 = $("player2");
+  const want = v2 ? media(v2.file_path) + "&v=" + (v2.fingerprint || "") : "";
+  if (p2.dataset.src !== want) { p2.dataset.src = want; if (want) p2.src = want; else p2.removeAttribute("src"); }
 }
 
 let shownFile = null;
@@ -238,15 +324,34 @@ function drawTimeline(plan) {
   g.textBaseline = "top";
   for (let t = 0; t <= T; t += T > 30 ? 10 : 5) g.fillText(fmtTime(t).replace(/\.\d\d$/, ""), Math.min(x(t), w - 34), base + 6);
   if (plan.outro) g.fillText("концовка", Math.max(0, x(plan.main_duration) + 4), 10);
+  const t = $("player").currentTime;
+  if (t > 0) { g.fillStyle = css.getPropertyValue("--text"); g.fillRect(Math.round(x(t)), 0, 1, 48); }
 }
-$("player").addEventListener("timeupdate", () => {
+$("player").addEventListener("timeupdate", () => { const v = currentVariant(); if (v && v.plan) drawTimeline(v.plan); });
+$("timeline").addEventListener("click", (e) => {
   const v = currentVariant(); if (!v || !v.plan) return;
-  drawTimeline(v.plan);
-  const cv = $("timeline"), g = cv.getContext("2d"), w = cv.clientWidth;
-  const xx = 1 + ($("player").currentTime / v.plan.total_duration) * (w - 2);
-  g.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--text");
-  g.fillRect(Math.round(xx), 0, 1, 48);
+  const r = e.currentTarget.getBoundingClientRect();
+  seek(((e.clientX - r.left - 1) / (r.width - 2)) * v.plan.total_duration);
 });
+function seek(t) {
+  const p = $("player"); p.currentTime = Math.max(0, t);
+  if ($("compareToggle").checked) $("player2").currentTime = p.currentTime;
+}
+function jumpCut(dir) {
+  const v = currentVariant(); if (!v || !v.plan) return;
+  const t = $("player").currentTime, cuts = v.plan.boundaries.slice(1, -1).concat(v.plan.outro ? [v.plan.main_duration] : []);
+  const next = dir > 0 ? cuts.find((c) => c > t + 0.02) : [...cuts].reverse().find((c) => c < t - 0.05);
+  seek(next != null ? next : dir > 0 ? t : 0);
+}
+// the comparison player follows the main one
+["play", "pause", "seeked", "ratechange"].forEach((ev) => $("player").addEventListener(ev, () => {
+  if (!$("compareToggle").checked) return;
+  const a = $("player"), b = $("player2");
+  if (ev === "play") { b.currentTime = a.currentTime; b.play().catch(() => {}); }
+  if (ev === "pause") b.pause();
+  if (ev === "seeked") b.currentTime = a.currentTime;
+  if (ev === "ratechange") b.playbackRate = a.playbackRate;
+}));
 
 /* ---------------------------------------------------------------- metadata + approval */
 let metaFor = null;
@@ -331,6 +436,7 @@ function replaceVariant(upd) {
 
 /* ---------------------------------------------------------------- jobs */
 let lastActive = 0;
+const jobSeen = new Map();
 async function pollJobs() {
   try { S.jobs = await api("/api/jobs"); } catch { return; }
   const active = S.jobs.filter((j) => j.status === "running" || j.status === "queued");
@@ -342,9 +448,13 @@ async function pollJobs() {
     if (lastActive && !active.length) { await loadSources(); await loadTracks(); await loadProjects(); }
   }
   for (const j of S.jobs) {
-    if (j.status === "error" && !j._seen && (j.kind === "scan_sources" || j.kind === "scan_music")) {
-      j._seen = true;
-    }
+    const before = jobSeen.get(j.id);
+    if (before === j.status) continue;
+    jobSeen.set(j.id, j.status);
+    if (before === undefined && (j.status === "done" || j.status === "error")) continue; // finished before this page opened
+    if (j.status === "error") toast(`${j.title}: ${j.error}`, "err");
+    else if (j.status === "done" && j.kind === "render") toast(`${j.title} готов`, "ok");
+    else if (j.status === "done" && j.kind === "export") toast(`${j.title} готов`, "ok", { label: "Открыть", run: () => reveal(j.result.path) });
   }
   lastActive = active.length;
 }
@@ -366,6 +476,13 @@ const PICK = {
 };
 async function openPicker(mode) {
   pickMode = mode;
+  const n = native();
+  if (n) {
+    const start = mode === "output" ? $("outputFolder").value : "";
+    const path = PICK[mode].files ? await n.pick_file(mode, start) : await n.pick_folder(start);
+    if (path) await pickDone(path, true);
+    return;
+  }
   $("pickerTitle").textContent = PICK[mode].title;
   $("pickerOk").hidden = !!PICK[mode].files;
   const start = mode === "output" ? $("outputFolder").value : mode === "png" ? $("wmImage").value.replace(/[\\/][^\\/]*$/, "") : "";
@@ -385,14 +502,18 @@ async function browse(path) {
   d.dirs.forEach((x) => add(x.name + "/", "", () => browse(x.path)));
   d.files.forEach((x) => add(x.name, "file", () => pickDone(x.path)));
 }
-async function pickDone(path) {
+async function pickDone(path, nativeDialog = false) {
   if (!path) return;
-  $("picker").close();
+  if (!nativeDialog) $("picker").close();
   if (pickMode === "source") {
     if (!S.cfg.source_folders.includes(path)) S.cfg = await api("/api/config", { method: "PUT", body: { source_folders: [...S.cfg.source_folders, path] } });
     renderFolders();
   } else if (pickMode === "output") { $("outputFolder").value = path; S.cfg = await api("/api/config", { method: "PUT", body: { output_folder: path } }); }
-  else if (pickMode === "png") { $("wmImage").value = path; }
+  else if (pickMode === "png") {
+    $("wmImage").value = path;
+    S.cfg = await api("/api/config", { method: "PUT", body: { watermark: { type: "image", image_path: path } } });
+    drawWmPreview();
+  }
   else if (pickMode === "track") { renderTrackSelect(path); }
 }
 
@@ -408,7 +529,13 @@ function renderAuth(auth) {
     div.innerHTML = `<div class="head"><span>${name}</span><span class="state ${st.authorized ? "ok" : ""}">${state}</span></div>`;
     if (st.configured) {
       const row = document.createElement("div"); row.className = "row";
-      row.innerHTML = `<a href="/api/auth/${plat}/start"><button type="button">${st.authorized ? "Переподключить" : "Подключить " + name}</button></a>`;
+      row.innerHTML = `<button type="button">${st.authorized ? "Переподключить" : "Подключить " + name}</button>`;
+      row.querySelector("button").onclick = () => {
+        const url = location.origin + `/api/auth/${plat}/start`;
+        const n = native();
+        if (n) { n.open_external(url); toast("Войдите в аккаунт в открывшемся браузере, затем вернитесь в EditMaker."); }
+        else location.href = url;
+      };
       div.appendChild(row);
       if (plat === "tiktok") {
         const lab = document.createElement("label"); lab.htmlFor = "ttCode"; lab.textContent = "Код TikTok или адрес после входа";
@@ -416,7 +543,7 @@ function renderAuth(auth) {
         pf.innerHTML = `<input id="ttCode" class="mono"><button type="button">Отправить</button>`;
         pf.querySelector("button").onclick = async () => {
           try { await api("/api/auth/tiktok/code", { method: "POST", body: { code: $("ttCode").value } }); renderAuth((await api("/api/state")).auth); }
-          catch (e) { alert(e.message); }
+          catch (e) { toast(e.message, "err"); }
         };
         div.append(lab, pf);
       }
@@ -433,7 +560,32 @@ function renderAuth(auth) {
 
 /* ---------------------------------------------------------------- events */
 document.querySelectorAll("input[name=wmType]").forEach((r) => (r.onchange = syncWm));
-$("wmOpacity").oninput = syncWm; $("wmSize").oninput = syncWm;
+["wmOpacity", "wmSize", "wmText", "wmColor", "wmPos", "wmImage"].forEach((id) => ($(id).oninput = syncWm));
+["wmIn", "wmOutro", "wmPos", "resolution"].forEach((id) => $(id).addEventListener("change", syncWm));
+$("compareToggle").onchange = renderCompare;
+$("compareSelect").onchange = renderCompare;
+$("prevCut").onclick = () => jumpCut(-1);
+$("nextCut").onclick = () => jumpCut(1);
+$("revealBtn").onclick = () => { const v = currentVariant(); if (v && v.file_path) reveal(v.file_path); };
+$("openFolderBtn").onclick = () => S.project && reveal(S.project.output_dir);
+$("quitBtn").onclick = async () => { await api("/api/shutdown", { method: "POST" }).catch(() => {}); document.body.innerHTML = "<p style='padding:24px'>EditMaker завершён. Вкладку можно закрыть.</p>"; };
+document.querySelectorAll("[data-export]").forEach((b) => (b.onclick = async () => {
+  const v = currentVariant(); if (!v) return;
+  try { await api(`/api/variants/${v.id}/export`, { method: "POST", body: { format: b.dataset.export } }); toast("Экспорт запущен"); pollJobs(); }
+  catch (e) { toast(e.message, "err"); }
+}));
+document.addEventListener("keydown", (e) => {
+  if (e.target.closest("input, textarea, select, [contenteditable]") || e.ctrlKey || e.metaKey || e.altKey) return;
+  if ($("picker").open) return;
+  if (/^[1-9]$/.test(e.key) && S.project) {
+    const v = S.project.variants[Number(e.key) - 1];
+    if (v) { S.variantId = v.id; renderProject(); e.preventDefault(); }
+  } else if (e.key === " ") {
+    const p = $("player"); if (!p.src) return;
+    p.paused ? p.play() : p.pause(); e.preventDefault();
+  } else if (e.key === "ArrowRight") { jumpCut(1); e.preventDefault(); }
+  else if (e.key === "ArrowLeft") { jumpCut(-1); e.preventDefault(); }
+});
 document.querySelectorAll("[data-pick]").forEach((b) => (b.onclick = () => openPicker(b.dataset.pick)));
 $("pickerGo").onclick = () => browse($("pickerPath").value);
 $("pickerPath").onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); browse($("pickerPath").value); } };
@@ -448,14 +600,22 @@ $("scanSources").onclick = async (e) => {
   try {
     const { job } = await api("/api/sources/scan", { method: "POST", body: { folders: S.cfg.source_folders } });
     const j = await waitJob(job);
-    if (j.status === "error") alert(j.error);
-    else if (j.result.errors.length) alert("Не удалось прочитать:\n" + j.result.errors.join("\n"));
+    if (j.status === "error") toast(j.error, "err");
+    else {
+      toast(`Найдено клипов: ${j.result.indexed}`, "ok");
+      if (j.result.errors.length) toast("Не удалось прочитать:\n" + j.result.errors.join("\n"), "err");
+    }
     await loadSources();
   } finally { e.target.disabled = false; }
 };
 $("scanMusic").onclick = async (e) => {
   e.target.disabled = true;
-  try { const { job } = await api("/api/music/scan", { method: "POST" }); await waitJob(job); await loadTracks(); }
+  try {
+    const { job } = await api("/api/music/scan", { method: "POST" });
+    const j = await waitJob(job);
+    if (j.status === "done") toast(`Треков: ${j.result.total}, новых проанализировано: ${j.result.analyzed}`, j.result.errors.length ? "err" : "ok");
+    await loadTracks();
+  }
   finally { e.target.disabled = false; }
 };
 $("outputFolder").onchange = async () => { S.cfg = await api("/api/config", { method: "PUT", body: { output_folder: $("outputFolder").value.trim() } }); };
@@ -477,6 +637,7 @@ $("createBtn").onclick = async (e) => {
     };
     const res = await api("/api/projects", { method: "POST", body });
     S.variantId = null;
+    toast(`Проект «${res.project.name}»: рендер ${res.jobs.length} вариантов запущен`);
     await loadProjects(res.project.id);
     pollJobs();
   } catch (err) { showErr($("createError"), err); }

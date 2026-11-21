@@ -1,0 +1,5 @@
+# Windows desktop build (GitHub Actions windows-latest)
+-r requirements.txt
+pywebview>=5.0
+pyinstaller>=6.6
+pillow>=10

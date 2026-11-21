@@ -13,8 +13,10 @@
   <span class="brand">EditMaker</span>
   <label class="sr" for="projectSelect">Проект</label>
   <select id="projectSelect"></select>
-  <span id="jobState" class="jobstate" hidden></span>
+  <button type="button" id="openFolderBtn" hidden>Открыть папку проекта</button>
+  <span id="jobState" class="jobstate" role="status" hidden></span>
   <span id="envState" class="env mono"></span>
+  <button type="button" id="quitBtn" hidden>Завершить</button>
 </header>
 
 <main class="work">
@@ -58,6 +60,10 @@
 
     <div class="group">
       <h2>Водяной знак</h2>
+      <div class="wmpreview" aria-hidden="true">
+        <div id="wmFrame" class="wmframe"><span id="wmMark" class="wmmark"></span></div>
+        <div id="wmOutroFrame" class="wmframe outro"><span id="wmOutroMark" class="wmmark"></span></div>
+      </div>
       <div class="seg" role="radiogroup" aria-label="Тип водяного знака">
         <label><input type="radio" name="wmType" value="text" checked> Текст</label>
         <label><input type="radio" name="wmType" value="image"> PNG</label>
@@ -144,7 +150,7 @@
       </div>
     </div>
 
-    <div class="group create">
+    <div class="group create sticky">
       <label for="projectName">Название проекта</label>
       <input id="projectName" placeholder="Название тайтла">
       <button type="button" id="createBtn" class="primary">Создать варианты</button>
@@ -157,19 +163,42 @@
     <div id="previewEmpty" class="empty big">Выберите исходники слева и нажмите «Создать варианты». Здесь появятся варианты монтажа.</div>
     <div id="previewBox" hidden>
       <div class="tabs" role="tablist" id="variantTabs"></div>
-      <div class="stage">
-        <video id="player" controls playsinline preload="metadata"></video>
-        <div id="renderState" class="renderstate" hidden>
-          <div class="bar"><span id="renderBar"></span></div>
-          <span id="renderText" class="mono"></span>
+      <div class="stages" id="stages">
+        <div class="stage">
+          <video id="player" controls playsinline preload="metadata"></video>
+          <div id="renderState" class="renderstate" hidden>
+            <div class="bar"><span id="renderBar"></span></div>
+            <span id="renderText" class="mono"></span>
+          </div>
+        </div>
+        <div class="stage" id="stage2" hidden>
+          <video id="player2" playsinline muted preload="metadata"></video>
+          <label class="sr" for="compareSelect">Вариант для сравнения</label>
+          <select id="compareSelect" class="compareselect"></select>
         </div>
       </div>
-      <canvas id="timeline" height="56" aria-label="Биты и склейки"></canvas>
+      <canvas id="timeline" height="56" aria-label="Биты и склейки, щелчок — перемотка"></canvas>
+      <div class="toolbar">
+        <button type="button" id="prevCut" aria-label="Предыдущая склейка" title="Предыдущая склейка (←)">‹ склейка</button>
+        <button type="button" id="nextCut" aria-label="Следующая склейка" title="Следующая склейка (→)">склейка ›</button>
+        <label class="check"><input type="checkbox" id="compareToggle"> Сравнить два варианта</label>
+        <span class="keys"><kbd>1</kbd>–<kbd>9</kbd> вариант <kbd>Пробел</kbd> пауза <kbd>←</kbd><kbd>→</kbd> склейки</span>
+      </div>
       <dl id="variantInfo" class="info"></dl>
       <p id="variantError" class="error" hidden></p>
       <div class="row">
         <button type="button" id="moreBtn">Ещё 2 варианта</button>
         <button type="button" id="rerenderBtn">Перерендерить</button>
+        <button type="button" id="revealBtn">Показать файл</button>
+      </div>
+      <div class="exports">
+        <h2>Доработать вручную</h2>
+        <p class="hint muted">Монтаж уходит с теми же склейками по битам. Переходы и эффекты добавляете в редакторе.</p>
+        <div class="row">
+          <button type="button" data-export="fcpxml">DaVinci Resolve / Final Cut</button>
+          <button type="button" data-export="edl">Premiere (EDL)</button>
+          <button type="button" data-export="capcut">Пакет для CapCut</button>
+        </div>
       </div>
     </div>
   </section>
@@ -268,6 +297,7 @@
   </form>
 </dialog>
 
+<div id="toasts" class="toasts" aria-live="polite"></div>
 <script src="/static/app.js"></script>
 </body>
 </html>

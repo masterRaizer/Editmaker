@@ -1,0 +1,111 @@
+name: Windows build (exe + msi)
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-build.txt
+
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements-build.txt
+
+      - name: Download ffmpeg 7.1 (BtbN, win64, GPL, NVENC)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          New-Item -ItemType Directory -Force packaging/ffmpeg, build/ff | Out-Null
+          gh release download latest -R BtbN/FFmpeg-Builds -p "ffmpeg-n7.1-latest-win64-gpl-7.1.zip" -D build/ff
+          if (-not (Get-ChildItem build/ff/*.zip -ErrorAction SilentlyContinue)) {
+            gh release download latest -R BtbN/FFmpeg-Builds -p "ffmpeg-n7*-latest-win64-gpl-7*.zip" -D build/ff
+          }
+          $zip = Get-ChildItem build/ff/*.zip | Select-Object -First 1
+          Expand-Archive $zip.FullName -DestinationPath build/ff/x -Force
+          Get-ChildItem build/ff/x -Recurse -Include ffmpeg.exe, ffprobe.exe | Copy-Item -Destination packaging/ffmpeg
+          packaging/ffmpeg/ffmpeg.exe -hide_banner -version | Select-Object -First 1
+
+      - name: Tests on Windows (bundled ffmpeg)
+        shell: pwsh
+        run: |
+          $env:EDITMAKER_FFMPEG = "$PWD\packaging\ffmpeg\ffmpeg.exe"
+          $env:EDITMAKER_FFPROBE = "$PWD\packaging\ffmpeg\ffprobe.exe"
+          python -m pytest -q
+
+      - name: Build folder app (for MSI)
+        run: pyinstaller --noconfirm --clean --distpath dist --workpath build/pyi packaging/editmaker.spec
+
+      - name: Smoke test EditMaker.exe (check + selftest)
+        shell: pwsh
+        run: |
+          $env:EDITMAKER_DATA = "$env:RUNNER_TEMP\em_data"
+          Start-Process dist/EditMaker/EditMaker.exe -ArgumentList "check" -Wait -NoNewWindow
+          Get-Content "$env:EDITMAKER_DATA\cli.log"
+          if (-not (Select-String -Path "$env:EDITMAKER_DATA\cli.log" -Pattern "ffmpeg version" -Quiet)) { throw "bundled ffmpeg not found" }
+          $st = "$env:RUNNER_TEMP\em_selftest"
+          $p = Start-Process dist/EditMaker/EditMaker.exe -ArgumentList "selftest", $st -Wait -PassThru -NoNewWindow
+          Get-Content "$env:EDITMAKER_DATA\cli.log"
+          if ($p.ExitCode -ne 0) { throw "selftest failed: $($p.ExitCode)" }
+          1..4 | ForEach-Object { if (-not (Test-Path ("$st\selftest\variant_0{0}.mp4" -f $_))) { throw "variant $_ missing" } }
+          Get-ChildItem "$st\selftest"
+
+      - name: Build MSI (WiX)
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          $ver = (python -c "import src; print(src.__version__)").Trim()
+          python packaging/make_wxs.py dist/EditMaker build/EditMaker.wxs $ver
+          wix build -arch x64 build/EditMaker.wxs -o "dist/EditMaker-$ver-x64.msi"
+          "VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Smoke test MSI (install, check files, uninstall)
+        shell: pwsh
+        run: |
+          $msi = (Resolve-Path "dist/EditMaker-$env:VERSION-x64.msi").Path
+          $p = Start-Process msiexec -ArgumentList "/i `"$msi`" /qn /l*v build\install.log" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content build\install.log -Tail 60; throw "msi install failed: $($p.ExitCode)" }
+          if (-not (Test-Path "$env:ProgramFiles\EditMaker\EditMaker.exe")) { throw "EditMaker.exe not installed" }
+          if (-not (Test-Path "$env:ProgramFiles\EditMaker\_internal\ffmpeg\ffmpeg.exe")) { throw "ffmpeg not installed" }
+          $p = Start-Process msiexec -ArgumentList "/x `"$msi`" /qn" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "msi uninstall failed: $($p.ExitCode)" }
+
+      - name: Build single-file EditMaker.exe
+        shell: pwsh
+        run: |
+          $env:EDITMAKER_ONEFILE = "1"
+          pyinstaller --noconfirm --distpath dist/onefile --workpath build/pyi1 packaging/editmaker.spec
+          Move-Item dist/onefile/EditMaker.exe "dist/EditMaker-$env:VERSION-portable.exe"
+          Get-ChildItem dist -File | Select-Object Name, @{n="MB";e={[math]::Round($_.Length/1MB,1)}}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: EditMaker-windows-${{ env.VERSION }}
+          path: |
+            dist/EditMaker-*-x64.msi
+            dist/EditMaker-*-portable.exe
+          if-no-files-found: error
+
+      - name: GitHub Release (tags v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/EditMaker-*-x64.msi
+            dist/EditMaker-*-portable.exe

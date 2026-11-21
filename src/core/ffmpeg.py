@@ -3,14 +3,37 @@ from __future__ import annotations
 
 import functools
 import json
+import os
 import re
 import shutil
 import subprocess
 from pathlib import Path
 from typing import Callable, Optional
 
-FFMPEG = shutil.which("ffmpeg") or "ffmpeg"
-FFPROBE = shutil.which("ffprobe") or "ffprobe"
+from .paths import ffmpeg_binary
+
+FFMPEG = ffmpeg_binary("ffmpeg")
+FFPROBE = ffmpeg_binary("ffprobe")
+
+# no console window per ffmpeg call in the windowed .exe
+_NOWIN = {"creationflags": 0x08000000} if os.name == "nt" else {}
+
+
+@functools.lru_cache(maxsize=1)
+def version() -> tuple[int, int]:
+    try:
+        out = subprocess.run([FFMPEG, "-version"], capture_output=True, text=True, timeout=10, **_NOWIN).stdout
+    except OSError:
+        return (0, 0)
+    m = re.search(r"ffmpeg version n?(\d+)\.(\d+)", out)
+    if m:
+        return int(m.group(1)), int(m.group(2))
+    return (99, 0) if "ffmpeg version" in out else (0, 0)  # git/master builds
+
+
+def filter_script_args(name: str) -> list[str]:
+    """-filter_complex_script was deprecated in 7.0 in favour of -/filter_complex."""
+    return ["-/filter_complex", name] if version() >= (7, 0) else ["-filter_complex_script", name]
 
 
 class FFmpegError(RuntimeError):
@@ -21,7 +44,7 @@ def available() -> dict:
     info = {"ffmpeg": None, "ffprobe": None}
     for key, binary in (("ffmpeg", FFMPEG), ("ffprobe", FFPROBE)):
         try:
-            out = subprocess.run([binary, "-version"], capture_output=True, text=True, timeout=10).stdout
+            out = subprocess.run([binary, "-version"], capture_output=True, text=True, timeout=10, **_NOWIN).stdout
             info[key] = out.splitlines()[0] if out else None
         except (OSError, subprocess.TimeoutExpired):
             info[key] = None
@@ -32,13 +55,13 @@ def available() -> dict:
 def nvenc_usable() -> bool:
     """True only if h264_nvenc is compiled in AND a GPU accepts a tiny encode."""
     try:
-        enc = subprocess.run([FFMPEG, "-hide_banner", "-encoders"], capture_output=True, text=True, timeout=10).stdout
+        enc = subprocess.run([FFMPEG, "-hide_banner", "-encoders"], capture_output=True, text=True, timeout=10, **_NOWIN).stdout
         if "h264_nvenc" not in enc:
             return False
         r = subprocess.run(
             [FFMPEG, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=black:s=256x256:d=0.2",
              "-c:v", "h264_nvenc", "-f", "null", "-"],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, timeout=30, **_NOWIN,
         )
         return r.returncode == 0
     except (OSError, subprocess.TimeoutExpired):
@@ -50,7 +73,7 @@ def gpu_name() -> Optional[str]:
     if not smi:
         return None
     try:
-        out = subprocess.run([smi, "--query-gpu=name", "--format=csv,noheader"], capture_output=True, text=True, timeout=10)
+        out = subprocess.run([smi, "--query-gpu=name", "--format=csv,noheader"], capture_output=True, text=True, timeout=10, **_NOWIN)
         return out.stdout.strip().splitlines()[0] if out.returncode == 0 and out.stdout.strip() else None
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -68,7 +91,7 @@ def _rate(s: str | None) -> float:
 def probe(path: Path) -> dict:
     r = subprocess.run(
         [FFPROBE, "-v", "error", "-print_format", "json", "-show_format", "-show_streams", str(path)],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True, text=True, timeout=60, **_NOWIN,
     )
     if r.returncode != 0:
         raise FFmpegError(f"ffprobe failed for {path}: {r.stderr.strip()[:300]}")
@@ -98,7 +121,7 @@ def run(args: list[str], *, total_seconds: float = 0.0, progress: Optional[Calla
     """Run ffmpeg with -progress parsing. Raises FFmpegError with the stderr tail."""
     cmd = [FFMPEG, "-hide_banner", "-nostdin", "-y", "-loglevel", "error", "-progress", "pipe:1", *args]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=cwd,
-                            encoding="utf-8", errors="replace")
+                            encoding="utf-8", errors="replace", **_NOWIN)
     stderr_lines: list[str] = []
 
     import threading
@@ -136,7 +159,7 @@ def decode_audio(path: Path, sr: int = 22050, start: float = 0.0, duration: floa
     if duration:
         cmd += ["-t", f"{duration:.3f}"]
     cmd += ["-vn", "-ac", "1", "-ar", str(sr), "-f", "f32le", "-"]
-    r = subprocess.run(cmd, capture_output=True, timeout=600)
+    r = subprocess.run(cmd, capture_output=True, timeout=600, **_NOWIN)
     if r.returncode != 0:
         raise FFmpegError(r.stderr.decode(errors="replace")[-300:])
     return np.frombuffer(r.stdout, dtype=np.float32).copy()
@@ -153,7 +176,7 @@ def decode_gray_frames(path: Path, fps: float = 4.0, width: int = 96):
     r = subprocess.run(
         [FFMPEG, "-v", "error", "-nostdin", "-i", str(path), "-an", "-vf",
          f"fps={fps},scale={width}:{h},format=gray", "-f", "rawvideo", "-"],
-        capture_output=True, timeout=1800,
+        capture_output=True, timeout=1800, **_NOWIN,
     )
     if r.returncode != 0:
         raise FFmpegError(r.stderr.decode(errors="replace")[-300:])
